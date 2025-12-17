@@ -38,7 +38,9 @@ ROBOT_LEG_JOINT_NAMES = [
 
 ROBOT_CFG = ArticulationCfg(
     spawn=sim_utils.UsdFileCfg(
-        usd_path="/home/lz/Project/IsaacLab/extreme_load/assets/robots/galileo_grq20_v2d3/grq20_v2d3_with_arm.usd",
+        usd_path=os.path.join(
+            RL_SIM_ENV_ASSETS_DIR, "robots", "galileo_grq20_v2d3", "grq20_v2d3_with_arm.usd"
+        ),
         activate_contact_sensors=True,
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             disable_gravity=False,
