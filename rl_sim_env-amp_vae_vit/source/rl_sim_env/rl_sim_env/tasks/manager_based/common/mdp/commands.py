@@ -70,26 +70,44 @@ class UniformVelocityCommandTerrain(CommandTerm):
             )
         # check if command_ids covers 0~num_envs-1 and no duplicates
         all_ids = [i for ids in self.cfg.command_ids.values() for i in ids]
-        # check number
-        if len(all_ids) != self.num_envs:
-            raise ValueError(
-                f"UniformVelocityCommandTerrain configuration error:\n"
-                f" command ID number should be {self.num_envs}, but got {len(all_ids)}"
-            )
-        # check if covers 0~num_envs-1 and no duplicates
         expected = set(range(self.num_envs))
         actual = set(all_ids)
-        if actual != expected:
-            missing = expected - actual
-            extra = actual - expected
-            msgs = []
-            if missing:
-                msgs.append(f"missing env id: {sorted(missing)}")
-            if extra:
-                msgs.append(f"extra env id: {sorted(extra)}")
-            raise ValueError(
-                "UniformVelocityCommandTerrain configuration error:\n" + "\n".join(msgs)
+        if len(all_ids) != self.num_envs or actual != expected:
+            # attempt auto-fix to keep training running when num_envs changes post-config
+            omni.log.warn(
+                f"UniformVelocityCommandTerrain: command_ids length/coverage mismatch "
+                f"(expected {self.num_envs}, got {len(all_ids)}). Auto-adjusting IDs."
             )
+            keys = list(self.cfg.command_ids.keys())
+            counts = {k: len(self.cfg.command_ids[k]) for k in keys}
+            total = max(1, sum(counts.values()))
+            new_ids = {}
+            start = 0
+            for key in keys[:-1]:
+                desired = int(round(counts[key] / total * self.num_envs))
+                new_ids[key] = list(range(start, start + desired))
+                start += desired
+            # last key absorbs remainder
+            last_key = keys[-1]
+            new_ids[last_key] = list(range(start, self.num_envs))
+            self.cfg.command_ids = new_ids
+
+            # recompute check after fix
+            all_ids = [i for ids in self.cfg.command_ids.values() for i in ids]
+            expected = set(range(self.num_envs))
+            actual = set(all_ids)
+            if len(all_ids) != self.num_envs or actual != expected:
+                missing = expected - actual
+                extra = actual - expected
+                msgs = []
+                if missing:
+                    msgs.append(f"missing env id: {sorted(missing)}")
+                if extra:
+                    msgs.append(f"extra env id: {sorted(extra)}")
+                raise ValueError(
+                    "UniformVelocityCommandTerrain configuration error after auto-fix:\n"
+                    + "\n".join(msgs)
+                )
 
         # crete buffers to store the command
         # -- command: x vel, y vel, yaw vel, heading
