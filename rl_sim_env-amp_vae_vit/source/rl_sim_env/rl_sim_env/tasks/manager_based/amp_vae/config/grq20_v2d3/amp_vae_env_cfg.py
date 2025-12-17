@@ -27,6 +27,7 @@ from rl_sim_env.tasks.manager_based.common.sensor.ray_caster_config import (
     CRITIC_HEIGHT_SCANNER_CFG,
 )
 from rl_sim_env.tasks.manager_based.common.terrain.config import AMP_VAE_TERRAIN_CFG
+from typing import Dict, Tuple
 
 # Helper: instantiate randomize_rigid_body_mass class lazily to avoid passing class directly to EventTerm.
 def randomize_payload_mass_once(
@@ -73,8 +74,9 @@ class Grq20V2d3AmpVaeEnvCfg(AmpVaeEnvCfg):
         self.scene.robot = ROBOT_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
 
         # terrain settings
-        num_envs = self.config_summary.env.num_envs
-        self.scene.num_envs = num_envs
+        # default num_envs comes from summary; may be overridden later (CLI).
+        if self.scene.num_envs is None:
+            self.scene.num_envs = self.config_summary.env.num_envs
         self.scene.terrain = AMP_VAE_TERRAIN_CFG
         # num_terrains = int(20.0 / self.config_summary.env.num_terrains_percent)
         # self.scene.terrain.terrain_generator.num_cols = num_terrains
@@ -104,36 +106,7 @@ class Grq20V2d3AmpVaeEnvCfg(AmpVaeEnvCfg):
         self.scene.frame_transform = create_body_frame_transform_cfg(ROBOT_BASE_LINK, ROBOT_FOOT_NAMES)
 
         # # command settings
-        command_ids = dict()
-        command_ranges = dict()
-        env_start = 0
-        
-        # 获取所有地形的 key 列表
-        sub_terrain_keys = list(self.scene.terrain.terrain_generator.sub_terrains.keys())
-        
-        for i, key in enumerate(sub_terrain_keys):
-            item = self.scene.terrain.terrain_generator.sub_terrains[key]
-            
-            # 如果是最后一个地形，直接分配剩余的所有环境，确保总数匹配
-            if i == len(sub_terrain_keys) - 1:
-                count = num_envs - env_start
-            else:
-                count = int(item.proportion * num_envs)
-            
-            # 分配 ID
-            command_ids[key] = list(range(env_start, env_start + count))
-            env_start += count
-            command_ranges[key] = self.config_summary.command.ranges[key]
-
-        self.commands.base_velocity = create_uniform_velocity_command_terrain_cfg(
-            command_ids=command_ids,
-            ranges=command_ranges,
-            lin_x_level=self.config_summary.command.lin_x_level,
-            ang_z_level=self.config_summary.command.ang_z_level,
-            max_lin_x_level=self.config_summary.command.max_lin_x_level,
-            max_ang_z_level=self.config_summary.command.max_ang_z_level,
-            heading_control_stiffness=self.config_summary.command.heading_control_stiffness,
-        )
+        self._rebuild_command_cfg(self.scene.num_envs)
 
         # reduce action scale & 仅控制腿部关节（机械臂从动作向量中移除，实现“锁死”）
         self.actions.joint_pos.scale = self.config_summary.action.scale
@@ -159,6 +132,47 @@ class Grq20V2d3AmpVaeEnvCfg(AmpVaeEnvCfg):
         self.observations.actor_obs.projected_gravity.scale = self.config_summary.observation.scale.projected_gravity
         self.observations.actor_obs.velocity_commands.params["scale"] = (
             self.config_summary.observation.scale.vel_command
+        )
+
+    def _compute_command_ids_and_ranges(self, num_envs: int) -> Tuple[Dict[str, list[int]], Dict[str, object]]:
+        """Split env ids across terrains, ensuring full coverage even when num_envs is overridden."""
+        command_ids: Dict[str, list[int]] = {}
+        command_ranges: Dict[str, object] = {}
+        env_start = 0
+
+        sub_terrain_keys = list(self.scene.terrain.terrain_generator.sub_terrains.keys())
+
+        for i, key in enumerate(sub_terrain_keys):
+            item = self.scene.terrain.terrain_generator.sub_terrains[key]
+            if i == len(sub_terrain_keys) - 1:
+                count = max(0, num_envs - env_start)
+            else:
+                count = int(item.proportion * num_envs)
+            command_ids[key] = list(range(env_start, env_start + count))
+            env_start += count
+            command_ranges[key] = self.config_summary.command.ranges[key]
+
+        # If due to rounding we still miss some envs, append them to the last key
+        total_assigned = sum(len(v) for v in command_ids.values())
+        if total_assigned < num_envs and sub_terrain_keys:
+            missing = num_envs - total_assigned
+            last_key = sub_terrain_keys[-1]
+            start = env_start
+            command_ids[last_key].extend(range(start, start + missing))
+        return command_ids, command_ranges
+
+    def _rebuild_command_cfg(self, num_envs: int):
+        """Recreate command config to match current num_envs (used when CLI overrides num_envs)."""
+        self.scene.num_envs = num_envs
+        command_ids, command_ranges = self._compute_command_ids_and_ranges(num_envs)
+        self.commands.base_velocity = create_uniform_velocity_command_terrain_cfg(
+            command_ids=command_ids,
+            ranges=command_ranges,
+            lin_x_level=self.config_summary.command.lin_x_level,
+            ang_z_level=self.config_summary.command.ang_z_level,
+            max_lin_x_level=self.config_summary.command.max_lin_x_level,
+            max_ang_z_level=self.config_summary.command.max_ang_z_level,
+            heading_control_stiffness=self.config_summary.command.heading_control_stiffness,
         )
         self.observations.actor_obs.joint_pos.scale = self.config_summary.observation.scale.joint_pos
         self.observations.actor_obs.joint_vel.scale = self.config_summary.observation.scale.joint_vel
