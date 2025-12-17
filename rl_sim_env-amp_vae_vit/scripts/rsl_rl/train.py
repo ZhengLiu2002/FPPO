@@ -10,6 +10,7 @@
 import argparse
 import sys
 from pathlib import Path
+import os
 
 
 from isaaclab.app import AppLauncher
@@ -71,12 +72,10 @@ if args_cli.distributed and version.parse(installed_version) < version.parse(RSL
 
 """Rest everything follows."""
 
-import os
 from datetime import datetime
 
 import gymnasium as gym
 import isaaclab_tasks  # noqa: F401
-import rl_sim_env.tasks  # noqa: F401
 import torch
 from isaaclab.envs import (
     DirectMARLEnv,
@@ -97,12 +96,17 @@ import os
 # =================================================================================
 _HERE = Path(__file__).resolve()
 _PROJECT_ROOT = _HERE.parents[2]
+_WORKSPACE_ROOT = _PROJECT_ROOT.parent
 _SOURCE_ROOT = _PROJECT_ROOT / "source"
 # Ensure local source tree is on sys.path so distributed runs can import modules
 for _p in (_SOURCE_ROOT, _SOURCE_ROOT / "rl_sim_env"):
     _p_str = str(_p)
     if _p.exists() and _p_str not in sys.path:
         sys.path.insert(0, _p_str)
+# Ensure RL_SIM_ENV resolves assets relative to workspace root unless user overrides
+os.environ.setdefault("RL_SIM_ENV_ROOT_DIR", str(_WORKSPACE_ROOT))
+
+import rl_sim_env.tasks  # noqa: F401
 
 # 1. 尝试导入配置类 (RslRlOnPolicyRunnerCfg) 和环境包装器 (AmpVaeVecEnvWrapper)
 try:
