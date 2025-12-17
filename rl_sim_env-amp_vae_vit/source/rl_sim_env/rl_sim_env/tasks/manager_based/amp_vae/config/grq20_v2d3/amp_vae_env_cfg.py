@@ -124,9 +124,13 @@ class Grq20V2d3AmpVaeEnvCfg(AmpVaeEnvCfg):
         self.observations.critic_obs.joint_pos.scale = self.config_summary.observation.scale.joint_pos
         self.observations.critic_obs.joint_vel.scale = self.config_summary.observation.scale.joint_vel
         self.observations.critic_obs.height_scan.scale = self.config_summary.observation.scale.height_measurements
-        self.observations.critic_obs.random_mass.scale = self.config_summary.observation.scale.random_mass
-        self.observations.critic_obs.random_com.scale = self.config_summary.observation.scale.random_com
-        self.observations.critic_obs.random_material.scale = self.config_summary.observation.scale.random_material
+        # optional critic-only aux terms (may be disabled in _rebuild_command_cfg)
+        if self.observations.critic_obs.random_mass is not None:
+            self.observations.critic_obs.random_mass.scale = self.config_summary.observation.scale.random_mass
+        if self.observations.critic_obs.random_com is not None:
+            self.observations.critic_obs.random_com.scale = self.config_summary.observation.scale.random_com
+        if self.observations.critic_obs.random_material is not None:
+            self.observations.critic_obs.random_material.scale = self.config_summary.observation.scale.random_material
         # actor obs
         self.observations.actor_obs.base_ang_vel.scale = self.config_summary.observation.scale.base_ang_vel
         self.observations.actor_obs.projected_gravity.scale = self.config_summary.observation.scale.projected_gravity
