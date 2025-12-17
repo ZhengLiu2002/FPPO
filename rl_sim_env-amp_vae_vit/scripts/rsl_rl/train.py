@@ -150,8 +150,19 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     """Train with RSL-RL agent."""
     # override configurations with non-hydra CLI arguments
     agent_cfg = cli_args.update_rsl_rl_cfg(agent_cfg, args_cli)
+    # number of envs: when distributed, interpret CLI num_envs as total and split per rank
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
     if args_cli.num_envs is not None:
-        env_cfg.scene.num_envs = args_cli.num_envs
+        requested_envs = args_cli.num_envs
+        if args_cli.distributed and world_size > 1:
+            per_rank_envs = max(1, (requested_envs + world_size - 1) // world_size)
+            print(
+                f"[INFO] Distributed run detected (world_size={world_size}); "
+                f"using {per_rank_envs} envs per rank to approximate total {requested_envs}."
+            )
+            env_cfg.scene.num_envs = per_rank_envs
+        else:
+            env_cfg.scene.num_envs = requested_envs
         # rebuild command ids if env cfg provides helper (ensures coverage matches num_envs)
         rebuild_fn = getattr(env_cfg, "_rebuild_command_cfg", None)
         if callable(rebuild_fn):
