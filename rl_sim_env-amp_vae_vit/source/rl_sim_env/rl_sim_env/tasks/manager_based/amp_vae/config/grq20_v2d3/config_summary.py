@@ -392,7 +392,7 @@ class AmpVaePPORunnerCfg(AmpVaeOnPolicyRunnerCfg):
     num_steps_per_env = 24
     max_iterations = 100000
     save_interval = 500
-    experiment_name = "grq20_v1d6_amp_vae"
+    experiment_name = "grq20_v2d3_amp_vae"
 
     policy = AmpVaePpoActorCriticCfg(
         init_noise_std=1.0,
