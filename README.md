@@ -42,13 +42,8 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun \
 conda activate isaaclab
 
 python rl_sim_env-amp_vae_vit/scripts/rsl_rl/play_amp_vae.py \
-  --task Rl-Sim-Env-AmpVae-Grq20-V2d3-v0 \
-  --num_envs 1 \
-  --checkpoint logs/rsl_rl/grq20_v1d6_amp_vae/2025-12-18_00-43-01_v2d3_arm_load_test/model_9000.pt
-
-python rl_sim_env-amp_vae_vit/scripts/rsl_rl/play_amp_vae.py \
  --task Rl-Sim-Env-AmpVae-Grq20-V2d3-Play-v0 \
- --num_envs 100 \
+ --num_envs 25 \
 --checkpoint logs/rsl_rl/grq20_v1d6_amp_vae/
 
 ```

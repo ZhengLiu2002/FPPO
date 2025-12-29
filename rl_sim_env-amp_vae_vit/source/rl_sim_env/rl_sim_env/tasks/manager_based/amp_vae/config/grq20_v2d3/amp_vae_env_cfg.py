@@ -342,14 +342,14 @@ class Grq20V2d3AmpVaeEnvCfg(AmpVaeEnvCfg):
             },
         )
 
-        # 3. 随机负载质量 (5kg 到 10kg)
+        # 3. 随机负载质量 (4kg 到 7kg)
         # 解释：Reset时，改变末端负载的物理属性。
         self.events.randomize_payload_mass = EventTerm(
             func=randomize_payload_mass_once,
             mode="reset",
             params={
                 "asset_cfg": SceneEntityCfg("robot", body_names=["arm_load_link"]),
-                "mass_distribution_params": (5.0, 10.0),
+                "mass_distribution_params": (4.0, 7.0),
                 # use "abs" to set absolute mass uniformly in range
                 "operation": "abs",
             },
@@ -433,13 +433,13 @@ class Grq20V2d3AmpVaeEnvCfg_PLAY(Grq20V2d3AmpVaeEnvCfg):
             },
         )
 
-        # 3. 随机负载质量 (5kg 到 10kg)
+        # 3. 随机负载质量 (4kg 到 7kg)
         self.events.randomize_payload_mass = EventTerm(
             func=randomize_payload_mass_once,
             mode="reset",
             params={
                 "asset_cfg": SceneEntityCfg("robot", body_names=["arm_load_link"]),
-                "mass_distribution_params": (5.0, 10.0),
+                "mass_distribution_params": (4.0, 7.0),
                 "operation": "abs",
             },
         )

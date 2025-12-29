@@ -131,7 +131,7 @@ class ConfigSummary:
         obs_history_length = 5
         num_vae_out = 20  # code_vel*3 + mass*1 + latent*16
         action_history_length = 3
-        clip_actions = 100.0
+        clip_actions = 1.0
         clip_obs = 100.0
 
     class command:
@@ -338,19 +338,19 @@ class ConfigSummary:
             weight = -0.05
 
         class dof_torques_l2:
-            weight = -1.0e-4
+            weight = -2.0e-6
 
         class dof_vel_l2:
             weight = -2.5e-4
 
         class dof_acc_l2:
-            weight = -2.5e-7
+            weight = -1.0e-8
 
         class action_rate_l2:
-            weight = -0.01
+            weight = -0.002
 
         class action_smoothness_l2:
-            weight = -0.01
+            weight = -0.002
 
         class joint_power:
             weight = -2.0e-5
