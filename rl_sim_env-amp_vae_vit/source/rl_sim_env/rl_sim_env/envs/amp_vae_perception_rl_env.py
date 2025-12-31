@@ -28,6 +28,7 @@ from rl_algorithms.rsl_rl.storage.data_buffer import DataBuffer
 from rl_sim_env.tasks.manager_based.amp_vae_perception.amp_vae_perception_base_env_cfg import (
     AmpVaePerceptionEnvCfg,
 )
+from rl_sim_env.tasks.manager_based.common.mdp import constraints as cmdp_constraints
 
 
 class AmpVaePerceptionRLEnv(ManagerBasedEnv, gym.Env):
@@ -236,6 +237,16 @@ class AmpVaePerceptionRLEnv(ManagerBasedEnv, gym.Env):
         if self.cfg.config_summary.reward.only_positive_reward:
             self.reward_buf[:] = torch.clip(self.reward_buf[:], min=0.0)
         self.episode_reward_buf += self.reward_buf
+
+        if not hasattr(self, "extras") or self.extras is None:
+            self.extras = {}
+        if "log" not in self.extras or self.extras["log"] is None:
+            self.extras["log"] = {}
+        constraint_info = cmdp_constraints.compute_constraint_info(self)
+        self.extras["log"].update(constraint_info)
+        constraint_cfg = getattr(self.cfg.config_summary, "constraint", None)
+        cost_keys = getattr(constraint_cfg, "cost_keys", None)
+        self.extras["cost"] = cmdp_constraints.aggregate_constraint_cost(constraint_info, cost_keys=cost_keys)
 
         if len(self.recorder_manager.active_terms) > 0:
             # update observations for recording if needed

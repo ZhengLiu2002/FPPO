@@ -45,7 +45,9 @@ simulation_app = app_launcher.app
 """Rest everything follows."""
 
 import os
+import sys
 import time
+from pathlib import Path
 
 import gymnasium as gym
 import isaaclab_tasks  # noqa: F401
@@ -55,14 +57,31 @@ from isaaclab.envs import DirectMARLEnv, multi_agent_to_single_agent
 from isaaclab.utils.assets import retrieve_file_path
 from isaaclab.utils.dict import print_dict
 from isaaclab.utils.pretrained_checkpoint import get_published_pretrained_checkpoint
-from isaaclab_rl.rsl_rl import (
-    RslRlOnPolicyRunnerCfg,
-    RslRlVecEnvWrapper,
-    export_policy_as_jit,
-    export_policy_as_onnx,
-)
 from isaaclab_tasks.utils import get_checkpoint_path, parse_env_cfg
-from rsl_rl.runners import OnPolicyRunner
+
+# ensure local source tree is visible for imports
+_HERE = Path(__file__).resolve()
+_PROJECT_ROOT = _HERE.parents[2]
+_WORKSPACE_ROOT = _PROJECT_ROOT.parent
+_SOURCE_ROOT = _PROJECT_ROOT / "source"
+for _p in (_SOURCE_ROOT, _SOURCE_ROOT / "rl_sim_env"):
+    _p_str = str(_p)
+    if _p.exists() and _p_str not in sys.path:
+        sys.path.insert(0, _p_str)
+os.environ.setdefault("RL_SIM_ENV_ROOT_DIR", str(_WORKSPACE_ROOT))
+
+try:
+    from rl_algorithms.rsl_rl_wrapper import RslRlOnPolicyRunnerCfg, RslRlVecEnvWrapper
+    from rl_algorithms.rsl_rl.runners import OnPolicyRunner
+except ImportError:
+    from rl_sim_env.rl_algorithms.rsl_rl_wrapper import RslRlOnPolicyRunnerCfg, RslRlVecEnvWrapper
+    from rl_sim_env.rl_algorithms.rsl_rl.runners import OnPolicyRunner
+
+try:
+    from isaaclab_rl.rsl_rl import export_policy_as_jit, export_policy_as_onnx
+except ImportError:
+    export_policy_as_jit = None
+    export_policy_as_onnx = None
 
 
 def main():
@@ -130,10 +149,11 @@ def main():
 
     # export policy to onnx/jit
     export_model_dir = os.path.join(os.path.dirname(resume_path), "exported")
-    export_policy_as_jit(policy_nn, ppo_runner.obs_normalizer, path=export_model_dir, filename="policy.pt")
-    export_policy_as_onnx(
-        policy_nn, normalizer=ppo_runner.obs_normalizer, path=export_model_dir, filename="policy.onnx"
-    )
+    if export_policy_as_jit is not None and export_policy_as_onnx is not None:
+        export_policy_as_jit(policy_nn, ppo_runner.obs_normalizer, path=export_model_dir, filename="policy.pt")
+        export_policy_as_onnx(
+            policy_nn, normalizer=ppo_runner.obs_normalizer, path=export_model_dir, filename="policy.onnx"
+        )
 
     dt = env.unwrapped.step_dt
 

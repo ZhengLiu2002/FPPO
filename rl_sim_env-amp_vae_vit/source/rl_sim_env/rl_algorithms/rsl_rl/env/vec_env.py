@@ -25,11 +25,12 @@ class VecEnv(ABC):
         and the values are the observations themselves. The following are reserved keys for the observations:
 
         - "critic": The observation is used as input to the critic network. Useful for asymmetric observation spaces.
-        - "rnd_state": The observation is used as input to the RND network. Useful for random network distillation.
-
     - "time_outs" (torch.Tensor): Timeouts for the environments. These correspond to terminations that happen due to time limits and
       not due to the environment reaching a terminal state. This is useful for environments that have a fixed
       episode length.
+
+    - "cost" (torch.Tensor | dict[str, torch.Tensor]): Optional step-wise cost signal(s) for CMDP training.
+      If multiple costs are returned, they can be provided as a dict and will be aggregated by the runner.
 
     - "log" (dict[str, float | torch.Tensor]): Additional information for logging and debugging purposes.
       The key should be a string and start with "/" for namespacing. The value can be a scalar or a tensor.

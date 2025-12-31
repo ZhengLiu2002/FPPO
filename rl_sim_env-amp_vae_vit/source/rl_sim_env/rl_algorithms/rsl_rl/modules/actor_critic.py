@@ -19,9 +19,10 @@ class ActorCritic(nn.Module):
         num_actor_obs,
         num_critic_obs,
         num_actions,
-        min_std,
+        min_std=0.0,
         actor_hidden_dims=[256, 256, 256],
         critic_hidden_dims=[256, 256, 256],
+        cost_critic_hidden_dims=None,
         activation="elu",
         init_noise_std=1.0,
         noise_std_type: str = "scalar",
@@ -37,6 +38,7 @@ class ActorCritic(nn.Module):
 
         mlp_input_dim_a = num_actor_obs
         mlp_input_dim_c = num_critic_obs
+        cost_critic_hidden_dims = cost_critic_hidden_dims or critic_hidden_dims
         # Policy
         actor_layers = []
         actor_layers.append(nn.Linear(mlp_input_dim_a, actor_hidden_dims[0]))
@@ -61,8 +63,23 @@ class ActorCritic(nn.Module):
                 critic_layers.append(activation)
         self.critic = nn.Sequential(*critic_layers)
 
+        # Cost value function (fully decoupled from reward critic)
+        cost_critic_layers = []
+        cost_critic_layers.append(nn.Linear(mlp_input_dim_c, cost_critic_hidden_dims[0]))
+        cost_critic_layers.append(activation)
+        for layer_index in range(len(cost_critic_hidden_dims)):
+            if layer_index == len(cost_critic_hidden_dims) - 1:
+                cost_critic_layers.append(nn.Linear(cost_critic_hidden_dims[layer_index], 1))
+            else:
+                cost_critic_layers.append(
+                    nn.Linear(cost_critic_hidden_dims[layer_index], cost_critic_hidden_dims[layer_index + 1])
+                )
+                cost_critic_layers.append(activation)
+        self.cost_critic = nn.Sequential(*cost_critic_layers)
+
         print(f"Actor MLP: {self.actor}")
         print(f"Critic MLP: {self.critic}")
+        print(f"Cost Critic MLP: {self.cost_critic}")
 
         # Action noise
         self.noise_std_type = noise_std_type
@@ -78,6 +95,8 @@ class ActorCritic(nn.Module):
         # disable args validation for speedup
         Normal.set_default_validate_args(False)
 
+        if min_std is None:
+            min_std = 0.0
         self.min_std = min_std
 
     @staticmethod
@@ -134,6 +153,10 @@ class ActorCritic(nn.Module):
     def evaluate(self, critic_observations, **kwargs):
         value = self.critic(critic_observations)
         return value
+
+    def evaluate_cost(self, critic_observations, **kwargs):
+        cost_value = self.cost_critic(critic_observations)
+        return cost_value
 
     def load_state_dict(self, state_dict, strict=True):
         """Load the parameters of the actor-critic model.

@@ -41,8 +41,6 @@ class Distillation:
             self.gpu_global_rank = 0
             self.gpu_world_size = 1
 
-        self.rnd = None  # TODO: remove when runner has a proper base class
-
         # distillation components
         self.policy = policy
         self.policy.to(self.device)
@@ -77,7 +75,6 @@ class Distillation:
             student_obs_shape,
             teacher_obs_shape,
             actions_shape,
-            None,
             self.device,
         )
 
@@ -90,7 +87,7 @@ class Distillation:
         self.transition.privileged_observations = teacher_obs
         return self.transition.actions
 
-    def process_env_step(self, rewards, dones, infos):
+    def process_env_step(self, rewards, dones, infos, costs=None):
         # record the rewards and dones
         self.transition.rewards = rewards
         self.transition.dones = dones

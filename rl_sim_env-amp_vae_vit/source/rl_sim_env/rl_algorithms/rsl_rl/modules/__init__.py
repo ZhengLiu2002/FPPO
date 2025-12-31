@@ -7,20 +7,14 @@
 
 from .actor_critic import ActorCritic
 from .actor_critic_recurrent import ActorCriticRecurrent
-from .amp_discriminator import AMPDiscriminator
 from .normalizer import EmpiricalNormalization
-from .rnd import RandomNetworkDistillation
 from .student_teacher import StudentTeacher
 from .student_teacher_recurrent import StudentTeacherRecurrent
-from .vae import VAE
 
 __all__ = [
     "ActorCritic",
     "ActorCriticRecurrent",
     "EmpiricalNormalization",
-    "RandomNetworkDistillation",
     "StudentTeacher",
     "StudentTeacherRecurrent",
-    "VAE",
-    "AMPDiscriminator",
 ]

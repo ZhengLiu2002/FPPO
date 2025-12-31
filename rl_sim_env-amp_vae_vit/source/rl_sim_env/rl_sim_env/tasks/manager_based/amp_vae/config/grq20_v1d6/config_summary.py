@@ -14,9 +14,9 @@ from isaaclab.actuators import DCMotorCfg, DelayedPDActuatorCfg, IdealPDActuator
 from isaaclab.assets.articulation import ArticulationCfg
 from isaaclab.utils import configclass
 from rl_algorithms.rsl_rl_wrapper import (
-    AmpVaeOnPolicyRunnerCfg,
-    AmpVaePpoActorCriticCfg,
-    AmpVaePpoAlgorithmCfg,
+    RslRlOnPolicyRunnerCfg,
+    RslRlPpoActorCriticCfg,
+    RslRlPpoAlgorithmCfg,
 )
 
 ROBOT_BASE_LINK = "base_link"
@@ -103,6 +103,18 @@ class ConfigSummary:
         action_history_length = 3
         clip_actions = 100.0
         clip_obs = 100.0
+
+    class constraint:
+        joint_pos_margin = 0.3
+        joint_vel_limit = 50.0
+        joint_torque_limit = 100.0
+        com_max_angle_rad = 0.35
+        cost_keys = [
+            "constraint_joint_pos",
+            "constraint_joint_vel",
+            "constraint_joint_torque",
+            "constraint_com_orientation",
+        ]
 
     class command:
         lin_x_level: float = 0.0
@@ -356,7 +368,7 @@ class ConfigSummary:
 
 
 @configclass
-class AmpVaePPORunnerCfg(AmpVaeOnPolicyRunnerCfg):
+class AmpVaePPORunnerCfg(RslRlOnPolicyRunnerCfg):
     seed = 42
     device = "cuda:0"
     num_steps_per_env = 24
@@ -364,15 +376,16 @@ class AmpVaePPORunnerCfg(AmpVaeOnPolicyRunnerCfg):
     save_interval = 500
     experiment_name = "grq20_v1d6_amp_vae"
 
-    policy = AmpVaePpoActorCriticCfg(
+    policy = RslRlPpoActorCriticCfg(
         init_noise_std=1.0,
         noise_std_type="scalar",
+        min_std=0.0,
         actor_hidden_dims=[512, 256, 128],
         critic_hidden_dims=[512, 256, 128],
         activation="elu",
-        min_normalized_std=[0.01, 0.01, 0.01] * 4,
     )
-    algorithm = AmpVaePpoAlgorithmCfg(
+    algorithm = RslRlPpoAlgorithmCfg(
+        name="fppo",
         value_loss_coef=0.5,
         use_clipped_value_loss=True,
         clip_param=0.2,
@@ -385,11 +398,4 @@ class AmpVaePPORunnerCfg(AmpVaeOnPolicyRunnerCfg):
         lam=0.95,
         desired_kl=0.01,
         max_grad_norm=1.0,
-        amp_replay_buffer_size=1000000,
-        amp_disc_grad_penalty=5.0,
-        learning_rate_vae=1.0e-3,
-        vae_beta=0.01,
-        vae_beta_min=1.0e-4,
-        vae_beta_max=0.1,
-        vae_desired_recon_loss=0.1,
     )

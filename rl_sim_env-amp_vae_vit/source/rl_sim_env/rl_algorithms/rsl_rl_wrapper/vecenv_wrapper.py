@@ -6,6 +6,7 @@
 import gymnasium as gym
 import torch
 from isaaclab.envs import DirectRLEnv, ManagerBasedRLEnv
+from isaaclab.envs.manager_based_env import ManagerBasedEnv
 from rl_algorithms.rsl_rl.env import VecEnv
 
 
@@ -28,7 +29,7 @@ class RslRlVecEnvWrapper(VecEnv):
         https://github.com/leggedrobotics/rsl_rl/blob/master/rsl_rl/env/vec_env.py
     """
 
-    def __init__(self, env: ManagerBasedRLEnv | DirectRLEnv, clip_actions: float | None = None):
+    def __init__(self, env: ManagerBasedRLEnv | DirectRLEnv | ManagerBasedEnv, clip_actions: float | None = None):
         """Initializes the wrapper.
 
         Note:
@@ -39,12 +40,14 @@ class RslRlVecEnvWrapper(VecEnv):
             clip_actions: The clipping value for actions. If ``None``, then no clipping is done.
 
         Raises:
-            ValueError: When the environment is not an instance of :class:`ManagerBasedRLEnv` or :class:`DirectRLEnv`.
+            ValueError: When the environment is not an instance of :class:`ManagerBasedRLEnv`,
+                :class:`ManagerBasedEnv`, or :class:`DirectRLEnv`.
         """
         # check that input is valid
-        if not isinstance(env.unwrapped, ManagerBasedRLEnv) and not isinstance(env.unwrapped, DirectRLEnv):
+        if not isinstance(env.unwrapped, (ManagerBasedRLEnv, ManagerBasedEnv, DirectRLEnv)):
             raise ValueError(
-                "The environment must be inherited from ManagerBasedRLEnv or DirectRLEnv. Environment type:"
+                "The environment must be inherited from ManagerBasedRLEnv, ManagerBasedEnv, or DirectRLEnv."
+                " Environment type:"
                 f" {type(env)}"
             )
         # initialize the wrapper
@@ -63,18 +66,37 @@ class RslRlVecEnvWrapper(VecEnv):
         else:
             self.num_actions = gym.spaces.flatdim(self.unwrapped.single_action_space)
         if hasattr(self.unwrapped, "observation_manager"):
-            self.num_obs = self.unwrapped.observation_manager.group_obs_dim["policy"][0]
+            group_obs_dim = self.unwrapped.observation_manager.group_obs_dim
+            if "policy" in group_obs_dim:
+                self._policy_obs_key = "policy"
+            elif "actor_obs" in group_obs_dim:
+                self._policy_obs_key = "actor_obs"
+            else:
+                raise KeyError(
+                    "Observation group for policy not found. Expected 'policy' or 'actor_obs', got:"
+                    f" {list(group_obs_dim.keys())}"
+                )
+            self.num_obs = group_obs_dim[self._policy_obs_key][0]
         else:
+            self._policy_obs_key = "policy"
             self.num_obs = gym.spaces.flatdim(self.unwrapped.single_observation_space["policy"])
         # -- privileged observations
-        if (
-            hasattr(self.unwrapped, "observation_manager")
-            and "critic" in self.unwrapped.observation_manager.group_obs_dim
-        ):
-            self.num_privileged_obs = self.unwrapped.observation_manager.group_obs_dim["critic"][0]
+        if hasattr(self.unwrapped, "observation_manager"):
+            group_obs_dim = self.unwrapped.observation_manager.group_obs_dim
+            if "critic" in group_obs_dim:
+                self._critic_obs_key = "critic"
+                self.num_privileged_obs = group_obs_dim["critic"][0]
+            elif "critic_obs" in group_obs_dim:
+                self._critic_obs_key = "critic_obs"
+                self.num_privileged_obs = group_obs_dim["critic_obs"][0]
+            else:
+                self._critic_obs_key = None
+                self.num_privileged_obs = 0
         elif hasattr(self.unwrapped, "num_states") and "critic" in self.unwrapped.single_observation_space:
+            self._critic_obs_key = "critic"
             self.num_privileged_obs = gym.spaces.flatdim(self.unwrapped.single_observation_space["critic"])
         else:
+            self._critic_obs_key = None
             self.num_privileged_obs = 0
 
         # modify the action space to the clip range
@@ -138,7 +160,7 @@ class RslRlVecEnvWrapper(VecEnv):
             obs_dict = self.unwrapped.observation_manager.compute()
         else:
             obs_dict = self.unwrapped._get_observations()
-        return obs_dict["policy"], {"observations": obs_dict}
+        return obs_dict[self._policy_obs_key], {"observations": obs_dict}
 
     @property
     def episode_length_buf(self) -> torch.Tensor:
@@ -165,18 +187,27 @@ class RslRlVecEnvWrapper(VecEnv):
         # reset the environment
         obs_dict, _ = self.env.reset()
         # return observations
-        return obs_dict["policy"], {"observations": obs_dict}
+        return obs_dict[self._policy_obs_key], {"observations": obs_dict}
 
     def step(self, actions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict]:
         # clip actions
         if self.clip_actions is not None:
             actions = torch.clamp(actions, -self.clip_actions, self.clip_actions)
         # record step information
-        obs_dict, rew, terminated, truncated, extras = self.env.step(actions)
+        step_out = self.env.step(actions)
+        if len(step_out) == 5:
+            obs_dict, rew, terminated, truncated, extras = step_out
+            extra_step_data = None
+        else:
+            obs_dict, rew, terminated, truncated, extras, *extra_step_data = step_out
+        if extras is None:
+            extras = {}
+        if extra_step_data:
+            extras.setdefault("extra_step_data", extra_step_data)
         # compute dones for compatibility with RSL-RL
         dones = (terminated | truncated).to(dtype=torch.long)
         # move extra observations to the extras dict
-        obs = obs_dict["policy"]
+        obs = obs_dict[self._policy_obs_key]
         extras["observations"] = obs_dict
         # move time out information to the extras dict
         # this is only needed for infinite horizon tasks

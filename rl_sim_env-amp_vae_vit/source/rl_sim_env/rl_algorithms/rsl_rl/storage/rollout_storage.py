@@ -17,13 +17,14 @@ class RolloutStorage:
             self.actions = None
             self.privileged_actions = None
             self.rewards = None
+            self.cost_rewards = None
             self.dones = None
             self.values = None
+            self.cost_values = None
             self.actions_log_prob = None
             self.action_mean = None
             self.action_sigma = None
             self.hidden_states = None
-            self.rnd_state = None
 
         def clear(self):
             self.__init__()
@@ -36,7 +37,6 @@ class RolloutStorage:
         obs_shape,
         privileged_obs_shape,
         actions_shape,
-        rnd_state_shape=None,
         device="cpu",
     ):
         # store inputs
@@ -46,7 +46,6 @@ class RolloutStorage:
         self.num_envs = num_envs
         self.obs_shape = obs_shape
         self.privileged_obs_shape = privileged_obs_shape
-        self.rnd_state_shape = rnd_state_shape
         self.actions_shape = actions_shape
 
         # Core
@@ -58,6 +57,7 @@ class RolloutStorage:
         else:
             self.privileged_observations = None
         self.rewards = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
+        self.cost_rewards = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
         self.actions = torch.zeros(num_transitions_per_env, num_envs, *actions_shape, device=self.device)
         self.dones = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device).byte()
 
@@ -68,19 +68,19 @@ class RolloutStorage:
         # for reinforcement learning
         if training_type == "rl":
             self.values = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
+            self.cost_values = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
             self.actions_log_prob = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
             self.mu = torch.zeros(num_transitions_per_env, num_envs, *actions_shape, device=self.device)
             self.sigma = torch.zeros(num_transitions_per_env, num_envs, *actions_shape, device=self.device)
             self.returns = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
             self.advantages = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
-
-        # For RND
-        if rnd_state_shape is not None:
-            self.rnd_state = torch.zeros(num_transitions_per_env, num_envs, *rnd_state_shape, device=self.device)
+            self.cost_returns = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
+            self.cost_advantages = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
 
         # For RNN networks
         self.saved_hidden_states_a = None
         self.saved_hidden_states_c = None
+        self.saved_hidden_states_cost = None
 
         # counter for the number of transitions stored
         self.step = 0
@@ -96,6 +96,8 @@ class RolloutStorage:
             self.privileged_observations[self.step].copy_(transition.privileged_observations)
         self.actions[self.step].copy_(transition.actions)
         self.rewards[self.step].copy_(transition.rewards.view(-1, 1))
+        if transition.cost_rewards is not None:
+            self.cost_rewards[self.step].copy_(transition.cost_rewards.view(-1, 1))
         self.dones[self.step].copy_(transition.dones.view(-1, 1))
 
         # for distillation
@@ -105,13 +107,10 @@ class RolloutStorage:
         # for reinforcement learning
         if self.training_type == "rl":
             self.values[self.step].copy_(transition.values)
+            self.cost_values[self.step].copy_(transition.cost_values)
             self.actions_log_prob[self.step].copy_(transition.actions_log_prob.view(-1, 1))
             self.mu[self.step].copy_(transition.action_mean)
             self.sigma[self.step].copy_(transition.action_sigma)
-
-        # For RND
-        if self.rnd_state_shape is not None:
-            self.rnd_state[self.step].copy_(transition.rnd_state)
 
         # For RNN networks
         self._save_hidden_states(transition.hidden_states)
@@ -120,11 +119,21 @@ class RolloutStorage:
         self.step += 1
 
     def _save_hidden_states(self, hidden_states):
-        if hidden_states is None or hidden_states == (None, None):
+        if hidden_states is None:
             return
-        # make a tuple out of GRU hidden state sto match the LSTM format
-        hid_a = hidden_states[0] if isinstance(hidden_states[0], tuple) else (hidden_states[0],)
-        hid_c = hidden_states[1] if isinstance(hidden_states[1], tuple) else (hidden_states[1],)
+        if len(hidden_states) == 2:
+            hid_a_raw, hid_c_raw = hidden_states
+            hid_cost_raw = None
+        elif len(hidden_states) == 3:
+            hid_a_raw, hid_c_raw, hid_cost_raw = hidden_states
+        else:
+            raise ValueError("Hidden states must be a tuple of length 2 or 3 (actor, critic, optional cost critic).")
+        if hid_a_raw is None and hid_c_raw is None and hid_cost_raw is None:
+            return
+        # make a tuple out of GRU hidden state to match the LSTM format
+        hid_a = hid_a_raw if isinstance(hid_a_raw, tuple) else (hid_a_raw,)
+        hid_c = hid_c_raw if isinstance(hid_c_raw, tuple) else (hid_c_raw,)
+        hid_cost = None if hid_cost_raw is None else (hid_cost_raw if isinstance(hid_cost_raw, tuple) else (hid_cost_raw,))
         # initialize if needed
         if self.saved_hidden_states_a is None:
             self.saved_hidden_states_a = [
@@ -133,22 +142,47 @@ class RolloutStorage:
             self.saved_hidden_states_c = [
                 torch.zeros(self.observations.shape[0], *hid_c[i].shape, device=self.device) for i in range(len(hid_c))
             ]
+            if hid_cost is not None:
+                self.saved_hidden_states_cost = [
+                    torch.zeros(self.observations.shape[0], *hid_cost[i].shape, device=self.device)
+                    for i in range(len(hid_cost))
+                ]
         # copy the states
         for i in range(len(hid_a)):
             self.saved_hidden_states_a[i][self.step].copy_(hid_a[i])
             self.saved_hidden_states_c[i][self.step].copy_(hid_c[i])
+        if hid_cost is not None and self.saved_hidden_states_cost is not None:
+            for i in range(len(hid_cost)):
+                self.saved_hidden_states_cost[i][self.step].copy_(hid_cost[i])
 
     def clear(self):
         self.step = 0
 
-    def compute_returns(self, last_values, gamma, lam, normalize_advantage: bool = True):
+    def compute_returns(
+        self,
+        last_values,
+        gamma,
+        lam,
+        normalize_advantage: bool = True,
+        last_cost_values=None,
+        cost_gamma=None,
+        cost_lam=None,
+        normalize_cost_advantage: bool = True,
+    ):
         advantage = 0
+        cost_advantage = 0
+        cost_gamma = gamma if cost_gamma is None else cost_gamma
+        cost_lam = lam if cost_lam is None else cost_lam
+        compute_cost = self.training_type == "rl" and last_cost_values is not None
+
         for step in reversed(range(self.num_transitions_per_env)):
             # if we are at the last step, bootstrap the return value
             if step == self.num_transitions_per_env - 1:
                 next_values = last_values
+                next_cost_values = last_cost_values if compute_cost else None
             else:
                 next_values = self.values[step + 1]
+                next_cost_values = self.cost_values[step + 1] if compute_cost else None
             # 1 if we are not in a terminal state, 0 otherwise
             next_is_not_terminal = 1.0 - self.dones[step].float()
             # TD error: r_t + gamma * V(s_{t+1}) - V(s_t)
@@ -158,12 +192,26 @@ class RolloutStorage:
             # Return: R_t = A(s_t, a_t) + V(s_t)
             self.returns[step] = advantage + self.values[step]
 
+            if compute_cost and next_cost_values is not None:
+                cost_delta = (
+                    self.cost_rewards[step] + next_is_not_terminal * cost_gamma * next_cost_values - self.cost_values[step]
+                )
+                cost_advantage = cost_delta + next_is_not_terminal * cost_gamma * cost_lam * cost_advantage
+                self.cost_returns[step] = cost_advantage + self.cost_values[step]
+
         # Compute the advantages
         self.advantages = self.returns - self.values
         # Normalize the advantages if flag is set
         # This is to prevent double normalization (i.e. if per minibatch normalization is used)
         if normalize_advantage:
             self.advantages = (self.advantages - self.advantages.mean()) / (self.advantages.std() + 1e-8)
+
+        if compute_cost:
+            self.cost_advantages = self.cost_returns - self.cost_values
+            if normalize_cost_advantage:
+                self.cost_advantages = (self.cost_advantages - self.cost_advantages.mean()) / (
+                    self.cost_advantages.std() + 1e-8
+                )
 
     # for distillation
     def generator(self):
@@ -197,16 +245,15 @@ class RolloutStorage:
         actions = self.actions.flatten(0, 1)
         values = self.values.flatten(0, 1)
         returns = self.returns.flatten(0, 1)
+        cost_values = self.cost_values.flatten(0, 1)
+        cost_returns = self.cost_returns.flatten(0, 1)
+        cost_advantages = self.cost_advantages.flatten(0, 1)
 
         # For PPO
         old_actions_log_prob = self.actions_log_prob.flatten(0, 1)
         advantages = self.advantages.flatten(0, 1)
         old_mu = self.mu.flatten(0, 1)
         old_sigma = self.sigma.flatten(0, 1)
-
-        # For RND
-        if self.rnd_state_shape is not None:
-            rnd_state = self.rnd_state.flatten(0, 1)
 
         for epoch in range(num_epochs):
             for i in range(num_mini_batches):
@@ -224,22 +271,31 @@ class RolloutStorage:
                 # -- For PPO
                 target_values_batch = values[batch_idx]
                 returns_batch = returns[batch_idx]
+                cost_values_batch = cost_values[batch_idx]
+                cost_returns_batch = cost_returns[batch_idx]
+                cost_advantages_batch = cost_advantages[batch_idx]
                 old_actions_log_prob_batch = old_actions_log_prob[batch_idx]
                 advantages_batch = advantages[batch_idx]
                 old_mu_batch = old_mu[batch_idx]
                 old_sigma_batch = old_sigma[batch_idx]
 
-                # -- For RND
-                if self.rnd_state_shape is not None:
-                    rnd_state_batch = rnd_state[batch_idx]
-                else:
-                    rnd_state_batch = None
-
                 # yield the mini-batch
-                yield obs_batch, privileged_observations_batch, actions_batch, target_values_batch, advantages_batch, returns_batch, old_actions_log_prob_batch, old_mu_batch, old_sigma_batch, (
+                yield (
+                    obs_batch,
+                    privileged_observations_batch,
+                    actions_batch,
+                    target_values_batch,
+                    advantages_batch,
+                    returns_batch,
+                    cost_values_batch,
+                    cost_returns_batch,
+                    cost_advantages_batch,
+                    old_actions_log_prob_batch,
+                    old_mu_batch,
+                    old_sigma_batch,
+                    (None, None, None),
                     None,
-                    None,
-                ), None, rnd_state_batch
+                )
 
     # for reinfrocement learning with recurrent networks
     def recurrent_mini_batch_generator(self, num_mini_batches, num_epochs=8):
@@ -250,11 +306,6 @@ class RolloutStorage:
             padded_privileged_obs_trajectories, _ = split_and_pad_trajectories(self.privileged_observations, self.dones)
         else:
             padded_privileged_obs_trajectories = padded_obs_trajectories
-
-        if self.rnd_state_shape is not None:
-            padded_rnd_state_trajectories, _ = split_and_pad_trajectories(self.rnd_state, self.dones)
-        else:
-            padded_rnd_state_trajectories = None
 
         mini_batch_size = self.num_envs // num_mini_batches
         for ep in range(num_epochs):
@@ -274,17 +325,15 @@ class RolloutStorage:
                 obs_batch = padded_obs_trajectories[:, first_traj:last_traj]
                 privileged_obs_batch = padded_privileged_obs_trajectories[:, first_traj:last_traj]
 
-                if padded_rnd_state_trajectories is not None:
-                    rnd_state_batch = padded_rnd_state_trajectories[:, first_traj:last_traj]
-                else:
-                    rnd_state_batch = None
-
                 actions_batch = self.actions[:, start:stop]
                 old_mu_batch = self.mu[:, start:stop]
                 old_sigma_batch = self.sigma[:, start:stop]
                 returns_batch = self.returns[:, start:stop]
+                cost_returns_batch = self.cost_returns[:, start:stop]
                 advantages_batch = self.advantages[:, start:stop]
+                cost_advantages_batch = self.cost_advantages[:, start:stop]
                 values_batch = self.values[:, start:stop]
+                cost_values_batch = self.cost_values[:, start:stop]
                 old_actions_log_prob_batch = self.actions_log_prob[:, start:stop]
 
                 # reshape to [num_envs, time, num layers, hidden dim] (original shape: [time, num_layers, num_envs, hidden_dim])
@@ -303,13 +352,36 @@ class RolloutStorage:
                     .contiguous()
                     for saved_hidden_states in self.saved_hidden_states_c
                 ]
+                if self.saved_hidden_states_cost is not None:
+                    hid_cost_batch = [
+                        saved_hidden_states.permute(2, 0, 1, 3)[last_was_done][first_traj:last_traj]
+                        .transpose(1, 0)
+                        .contiguous()
+                        for saved_hidden_states in self.saved_hidden_states_cost
+                    ]
+                else:
+                    hid_cost_batch = None
                 # remove the tuple for GRU
                 hid_a_batch = hid_a_batch[0] if len(hid_a_batch) == 1 else hid_a_batch
                 hid_c_batch = hid_c_batch[0] if len(hid_c_batch) == 1 else hid_c_batch
+                if hid_cost_batch is not None:
+                    hid_cost_batch = hid_cost_batch[0] if len(hid_cost_batch) == 1 else hid_cost_batch
 
-                yield obs_batch, privileged_obs_batch, actions_batch, values_batch, advantages_batch, returns_batch, old_actions_log_prob_batch, old_mu_batch, old_sigma_batch, (
-                    hid_a_batch,
-                    hid_c_batch,
-                ), masks_batch, rnd_state_batch
+                yield (
+                    obs_batch,
+                    privileged_obs_batch,
+                    actions_batch,
+                    values_batch,
+                    advantages_batch,
+                    returns_batch,
+                    cost_values_batch,
+                    cost_returns_batch,
+                    cost_advantages_batch,
+                    old_actions_log_prob_batch,
+                    old_mu_batch,
+                    old_sigma_batch,
+                    (hid_a_batch, hid_c_batch, hid_cost_batch),
+                    masks_batch,
+                )
 
                 first_traj = last_traj

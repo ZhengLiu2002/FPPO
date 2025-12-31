@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import inspect
 import os
 import statistics
 import time
@@ -22,7 +23,7 @@ import torch
 #     StudentTeacherRecurrent,
 # )
 # from rsl_rl.utils import store_code_state
-from ..algorithms import PPO, Distillation
+from .. import algorithms as algs
 from ..env import VecEnv
 from ..modules import (
     ActorCritic,
@@ -47,12 +48,13 @@ class OnPolicyRunner:
         self._configure_multi_gpu()
 
         # resolve training type depending on the algorithm
-        if self.alg_cfg["class_name"] == "PPO":
-            self.training_type = "rl"
-        elif self.alg_cfg["class_name"] == "Distillation":
+        alg_id = self.alg_cfg.get("name", self.alg_cfg.get("class_name"))
+        if alg_id is None:
+            raise ValueError("Algorithm name not found. Please set 'algorithm.name' or 'algorithm.class_name'.")
+        if alg_id.lower() == "distillation":
             self.training_type = "distillation"
         else:
-            raise ValueError(f"Training type not found for algorithm {self.alg_cfg['class_name']}.")
+            self.training_type = "rl"
 
         # resolve dimensions of observations
         obs, extras = self.env.get_observations()
@@ -62,6 +64,8 @@ class OnPolicyRunner:
         if self.training_type == "rl":
             if "critic" in extras["observations"]:
                 self.privileged_obs_type = "critic"  # actor-critic reinforcement learnig, e.g., PPO
+            elif "critic_obs" in extras["observations"]:
+                self.privileged_obs_type = "critic_obs"
             else:
                 self.privileged_obs_type = None
         if self.training_type == "distillation":
@@ -77,34 +81,29 @@ class OnPolicyRunner:
             num_privileged_obs = num_obs
 
         # evaluate the policy class
-        policy_class = eval(self.policy_cfg.pop("class_name"))
+        policy_cfg = dict(self.policy_cfg)
+        policy_class_name = policy_cfg.pop("class_name")
+        policy_class = eval(policy_class_name)
         policy: ActorCritic | ActorCriticRecurrent | StudentTeacher | StudentTeacherRecurrent = policy_class(
-            num_obs, num_privileged_obs, self.env.num_actions, **self.policy_cfg
+            num_obs, num_privileged_obs, self.env.num_actions, **policy_cfg
         ).to(self.device)
 
-        # resolve dimension of rnd gated state
-        if "rnd_cfg" in self.alg_cfg and self.alg_cfg["rnd_cfg"] is not None:
-            # check if rnd gated state is present
-            rnd_state = extras["observations"].get("rnd_state")
-            if rnd_state is None:
-                raise ValueError("Observations for the key 'rnd_state' not found in infos['observations'].")
-            # get dimension of rnd gated state
-            num_rnd_state = rnd_state.shape[1]
-            # add rnd gated state to config
-            self.alg_cfg["rnd_cfg"]["num_states"] = num_rnd_state
-            # scale down the rnd weight with timestep (similar to how rewards are scaled down in legged_gym envs)
-            self.alg_cfg["rnd_cfg"]["weight"] *= env.unwrapped.step_dt
-
-        # if using symmetry then pass the environment config object
-        if "symmetry_cfg" in self.alg_cfg and self.alg_cfg["symmetry_cfg"] is not None:
-            # this is used by the symmetry function for handling different observation terms
-            self.alg_cfg["symmetry_cfg"]["_env"] = env
-
         # initialize algorithm
-        alg_class = eval(self.alg_cfg.pop("class_name"))
-        self.alg: PPO | Distillation = alg_class(
-            policy, device=self.device, **self.alg_cfg, multi_gpu_cfg=self.multi_gpu_cfg
-        )
+        alg_cfg = dict(self.alg_cfg)
+        alg_name = alg_cfg.pop("name", None)
+        alg_class_name = alg_cfg.pop("class_name", None)
+        if alg_name is not None:
+            alg_class = algs.ALGORITHM_REGISTRY.get(alg_name.lower())
+            if alg_class is None:
+                raise ValueError(f"Algorithm '{alg_name}' not found in registry.")
+        elif alg_class_name is not None:
+            alg_class = getattr(algs, alg_class_name, None)
+            if alg_class is None:
+                raise ValueError(f"Algorithm class '{alg_class_name}' not found.")
+        else:
+            raise ValueError("Algorithm name not found. Please set 'algorithm.name' or 'algorithm.class_name'.")
+        alg_cfg = self._filter_kwargs(alg_class, alg_cfg)
+        self.alg = alg_class(policy, device=self.device, **alg_cfg, multi_gpu_cfg=self.multi_gpu_cfg)
 
         # store training configuration
         self.num_steps_per_env = self.cfg["num_steps_per_env"]
@@ -189,13 +188,6 @@ class OnPolicyRunner:
         cur_reward_sum = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
         cur_episode_length = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
 
-        # create buffers for logging extrinsic and intrinsic rewards
-        if self.alg.rnd:
-            erewbuffer = deque(maxlen=100)
-            irewbuffer = deque(maxlen=100)
-            cur_ereward_sum = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
-            cur_ireward_sum = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
-
         # Ensure all parameters are in-synced
         if self.is_distributed:
             print(f"Synchronizing parameters for rank {self.gpu_global_rank}...")
@@ -227,10 +219,8 @@ class OnPolicyRunner:
                         privileged_obs = obs
 
                     # process the step
-                    self.alg.process_env_step(rewards, dones, infos)
-
-                    # Extract intrinsic rewards (only for logging)
-                    intrinsic_rewards = self.alg.intrinsic_rewards if self.alg.rnd else None
+                    costs = self._extract_costs(infos, rewards)
+                    self.alg.process_env_step(rewards, dones, infos, costs)
 
                     # book keeping
                     if self.log_dir is not None:
@@ -239,12 +229,7 @@ class OnPolicyRunner:
                         elif "log" in infos:
                             ep_infos.append(infos["log"])
                         # Update rewards
-                        if self.alg.rnd:
-                            cur_ereward_sum += rewards
-                            cur_ireward_sum += intrinsic_rewards  # type: ignore
-                            cur_reward_sum += rewards + intrinsic_rewards
-                        else:
-                            cur_reward_sum += rewards
+                        cur_reward_sum += rewards
                         # Update episode length
                         cur_episode_length += 1
                         # Clear data for completed episodes
@@ -254,12 +239,6 @@ class OnPolicyRunner:
                         lenbuffer.extend(cur_episode_length[new_ids][:, 0].cpu().numpy().tolist())
                         cur_reward_sum[new_ids] = 0
                         cur_episode_length[new_ids] = 0
-                        # -- intrinsic and extrinsic rewards
-                        if self.alg.rnd:
-                            erewbuffer.extend(cur_ereward_sum[new_ids][:, 0].cpu().numpy().tolist())
-                            irewbuffer.extend(cur_ireward_sum[new_ids][:, 0].cpu().numpy().tolist())
-                            cur_ereward_sum[new_ids] = 0
-                            cur_ireward_sum[new_ids] = 0
 
                 stop = time.time()
                 collection_time = stop - start
@@ -337,6 +316,23 @@ class OnPolicyRunner:
             self.writer.add_scalar(f"Loss/{key}", value, locs["it"])
         self.writer.add_scalar("Loss/learning_rate", self.alg.learning_rate, locs["it"])
 
+        # -- Training metrics
+        train_metrics = getattr(self.alg, "train_metrics", None)
+        if train_metrics:
+            for key, value in train_metrics.items():
+                if value is None:
+                    continue
+                if key == "cost_limit_margin":
+                    self.writer.add_scalar("Train/cost_limit_margin", value, locs["it"])
+                elif key == "mean_cost_return":
+                    self.writer.add_scalar("Cost/mean", value, locs["it"])
+                elif key == "cost_violation_rate":
+                    self.writer.add_scalar("Cost/violation", value, locs["it"])
+                elif key == "kl":
+                    self.writer.add_scalar("Policy/kl", value, locs["it"])
+                else:
+                    self.writer.add_scalar(f"Train/{key}", value, locs["it"])
+
         # -- Policy
         self.writer.add_scalar("Policy/mean_noise_std", mean_std.item(), locs["it"])
 
@@ -347,12 +343,6 @@ class OnPolicyRunner:
 
         # -- Training
         if len(locs["rewbuffer"]) > 0:
-            # separate logging for intrinsic and extrinsic rewards
-            if self.alg.rnd:
-                self.writer.add_scalar("Rnd/mean_extrinsic_reward", statistics.mean(locs["erewbuffer"]), locs["it"])
-                self.writer.add_scalar("Rnd/mean_intrinsic_reward", statistics.mean(locs["irewbuffer"]), locs["it"])
-                self.writer.add_scalar("Rnd/weight", self.alg.rnd.weight, locs["it"])
-            # everything else
             self.writer.add_scalar("Train/mean_reward", statistics.mean(locs["rewbuffer"]), locs["it"])
             self.writer.add_scalar("Train/mean_episode_length", statistics.mean(locs["lenbuffer"]), locs["it"])
             if self.logger_type != "wandb":  # wandb does not support non-integer x-axis logging
@@ -374,12 +364,6 @@ class OnPolicyRunner:
             # -- Losses
             for key, value in locs["loss_dict"].items():
                 log_string += f"""{f'Mean {key} loss:':>{pad}} {value:.4f}\n"""
-            # -- Rewards
-            if self.alg.rnd:
-                log_string += (
-                    f"""{'Mean extrinsic reward:':>{pad}} {statistics.mean(locs['erewbuffer']):.2f}\n"""
-                    f"""{'Mean intrinsic reward:':>{pad}} {statistics.mean(locs['irewbuffer']):.2f}\n"""
-                )
             log_string += f"""{'Mean reward:':>{pad}} {statistics.mean(locs['rewbuffer']):.2f}\n"""
             # -- episode info
             log_string += f"""{'Mean episode length:':>{pad}} {statistics.mean(locs['lenbuffer']):.2f}\n"""
@@ -407,16 +391,18 @@ class OnPolicyRunner:
 
     def save(self, path: str, infos=None):
         # -- Save model
+        optimizer_state = None
+        if hasattr(self.alg, "optimizer") and self.alg.optimizer is not None:
+            if isinstance(self.alg.optimizer, dict):
+                optimizer_state = {key: opt.state_dict() for key, opt in self.alg.optimizer.items()}
+            else:
+                optimizer_state = self.alg.optimizer.state_dict()
         saved_dict = {
             "model_state_dict": self.alg.policy.state_dict(),
-            "optimizer_state_dict": self.alg.optimizer.state_dict(),
+            "optimizer_state_dict": optimizer_state,
             "iter": self.current_learning_iteration,
             "infos": infos,
         }
-        # -- Save RND model if used
-        if self.alg.rnd:
-            saved_dict["rnd_state_dict"] = self.alg.rnd.state_dict()
-            saved_dict["rnd_optimizer_state_dict"] = self.alg.rnd_optimizer.state_dict()
         # -- Save observation normalizer if used
         if self.empirical_normalization:
             saved_dict["obs_norm_state_dict"] = self.obs_normalizer.state_dict()
@@ -433,9 +419,6 @@ class OnPolicyRunner:
         loaded_dict = torch.load(path, weights_only=False)
         # -- Load model
         resumed_training = self.alg.policy.load_state_dict(loaded_dict["model_state_dict"])
-        # -- Load RND model if used
-        if self.alg.rnd:
-            self.alg.rnd.load_state_dict(loaded_dict["rnd_state_dict"])
         # -- Load observation normalizer if used
         if self.empirical_normalization:
             if resumed_training:
@@ -451,10 +434,14 @@ class OnPolicyRunner:
         # -- load optimizer if used
         if load_optimizer and resumed_training:
             # -- algorithm optimizer
-            self.alg.optimizer.load_state_dict(loaded_dict["optimizer_state_dict"])
-            # -- RND optimizer if used
-            if self.alg.rnd:
-                self.alg.rnd_optimizer.load_state_dict(loaded_dict["rnd_optimizer_state_dict"])
+            optimizer_state = loaded_dict.get("optimizer_state_dict")
+            if optimizer_state is not None and hasattr(self.alg, "optimizer") and self.alg.optimizer is not None:
+                if isinstance(self.alg.optimizer, dict):
+                    for key, opt in self.alg.optimizer.items():
+                        if key in optimizer_state:
+                            opt.load_state_dict(optimizer_state[key])
+                else:
+                    self.alg.optimizer.load_state_dict(optimizer_state)
         # -- load current learning iteration
         if resumed_training:
             self.current_learning_iteration = loaded_dict["iter"]
@@ -474,9 +461,6 @@ class OnPolicyRunner:
     def train_mode(self):
         # -- PPO
         self.alg.policy.train()
-        # -- RND
-        if self.alg.rnd:
-            self.alg.rnd.train()
         # -- Normalization
         if self.empirical_normalization:
             self.obs_normalizer.train()
@@ -485,9 +469,6 @@ class OnPolicyRunner:
     def eval_mode(self):
         # -- PPO
         self.alg.policy.eval()
-        # -- RND
-        if self.alg.rnd:
-            self.alg.rnd.eval()
         # -- Normalization
         if self.empirical_normalization:
             self.obs_normalizer.eval()
@@ -499,6 +480,32 @@ class OnPolicyRunner:
     """
     Helper functions.
     """
+
+    @staticmethod
+    def _filter_kwargs(cls, kwargs: dict) -> dict:
+        signature = inspect.signature(cls.__init__)
+        valid_keys = set(signature.parameters.keys()) - {"self"}
+        return {key: value for key, value in kwargs.items() if key in valid_keys}
+
+    def _extract_costs(self, infos: dict, rewards: torch.Tensor) -> torch.Tensor:
+        cost = infos.get("cost") if isinstance(infos, dict) else None
+        if cost is None:
+            return torch.zeros_like(rewards)
+        if isinstance(cost, dict):
+            if not cost:
+                return torch.zeros_like(rewards)
+            cost_values = list(cost.values())
+            cost = cost_values[0]
+            for value in cost_values[1:]:
+                cost = cost + value
+        if not torch.is_tensor(cost):
+            cost = torch.as_tensor(cost, device=self.device)
+        cost = cost.to(self.device)
+        if cost.ndim > 1 and cost.shape[-1] > 1:
+            cost = cost.sum(dim=-1)
+        if cost.ndim == 1 and rewards.ndim > 1:
+            cost = cost.unsqueeze(-1)
+        return cost
 
     def _configure_multi_gpu(self):
         """Configure multi-gpu training."""

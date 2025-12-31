@@ -11,6 +11,7 @@ from .commands import *  # noqa: F401, F403
 from .commands_cfg import *  # noqa: F401, F403
 from .curriculums import *  # noqa: F401, F403
 from .events import *
+from .constraints import *  # noqa: F401, F403
 from .observations import *
 from .rewards import *  # noqa: F401, F403
 from .terminations import *  # noqa: F401, F403

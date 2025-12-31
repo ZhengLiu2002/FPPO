@@ -20,8 +20,10 @@ class ActorCriticRecurrent(ActorCritic):
         num_actor_obs,
         num_critic_obs,
         num_actions,
+        min_std=0.0,
         actor_hidden_dims=[256, 256, 256],
         critic_hidden_dims=[256, 256, 256],
+        cost_critic_hidden_dims=None,
         activation="elu",
         rnn_type="lstm",
         rnn_hidden_dim=256,
@@ -46,8 +48,10 @@ class ActorCriticRecurrent(ActorCritic):
             num_actor_obs=rnn_hidden_dim,
             num_critic_obs=rnn_hidden_dim,
             num_actions=num_actions,
+            min_std=min_std,
             actor_hidden_dims=actor_hidden_dims,
             critic_hidden_dims=critic_hidden_dims,
+            cost_critic_hidden_dims=cost_critic_hidden_dims,
             activation=activation,
             init_noise_std=init_noise_std,
         )
@@ -56,13 +60,18 @@ class ActorCriticRecurrent(ActorCritic):
 
         self.memory_a = Memory(num_actor_obs, type=rnn_type, num_layers=rnn_num_layers, hidden_size=rnn_hidden_dim)
         self.memory_c = Memory(num_critic_obs, type=rnn_type, num_layers=rnn_num_layers, hidden_size=rnn_hidden_dim)
+        self.memory_cost = Memory(
+            num_critic_obs, type=rnn_type, num_layers=rnn_num_layers, hidden_size=rnn_hidden_dim
+        )
 
         print(f"Actor RNN: {self.memory_a}")
         print(f"Critic RNN: {self.memory_c}")
+        print(f"Cost Critic RNN: {self.memory_cost}")
 
     def reset(self, dones=None):
         self.memory_a.reset(dones)
         self.memory_c.reset(dones)
+        self.memory_cost.reset(dones)
 
     def act(self, observations, masks=None, hidden_states=None):
         input_a = self.memory_a(observations, masks, hidden_states)
@@ -76,5 +85,9 @@ class ActorCriticRecurrent(ActorCritic):
         input_c = self.memory_c(critic_observations, masks, hidden_states)
         return super().evaluate(input_c.squeeze(0))
 
+    def evaluate_cost(self, critic_observations, masks=None, hidden_states=None):
+        input_cost = self.memory_cost(critic_observations, masks, hidden_states)
+        return super().evaluate_cost(input_cost.squeeze(0))
+
     def get_hidden_states(self):
-        return self.memory_a.hidden_states, self.memory_c.hidden_states
+        return self.memory_a.hidden_states, self.memory_c.hidden_states, self.memory_cost.hidden_states

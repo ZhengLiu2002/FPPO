@@ -5,10 +5,22 @@
 
 """Implementation of different RL agents."""
 
-from .amp_vae_perception_ppo import AMPVAEPerceptionPPO
-from .amp_vae_ppo import AMPVAEPPO
-from .amp_vae_vit_ppo import AMPVAEVITPPO
+from .cpo import CPO
 from .distillation import Distillation
+from .focpo import FOCPO
+from .fppo import FPPO
+from .pcpo import PCPO
 from .ppo import PPO
+from .ppo_lagrange import PPOLagrange
 
-__all__ = ["PPO", "Distillation", "AMPVAEPPO", "AMPVAEPerceptionPPO", "AMPVAEVITPPO"]
+ALGORITHM_REGISTRY = {
+    "ppo": PPO,
+    "fppo": FPPO,
+    "ppo_lagrange": PPOLagrange,
+    "cpo": CPO,
+    "pcpo": PCPO,
+    "focpo": FOCPO,
+    "distillation": Distillation,
+}
+
+__all__ = ["PPO", "FPPO", "PPOLagrange", "CPO", "PCPO", "FOCPO", "Distillation", "ALGORITHM_REGISTRY"]

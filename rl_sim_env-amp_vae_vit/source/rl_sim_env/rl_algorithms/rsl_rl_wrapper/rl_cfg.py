@@ -8,9 +8,6 @@ from typing import Literal
 
 from isaaclab.utils import configclass
 
-from .rnd_cfg import RslRlRndCfg
-from .symmetry_cfg import RslRlSymmetryCfg
-
 
 @configclass
 class RslRlPpoActorCriticCfg:
@@ -25,11 +22,17 @@ class RslRlPpoActorCriticCfg:
     noise_std_type: Literal["scalar", "log"] = "scalar"
     """The type of noise standard deviation for the policy. Default is scalar."""
 
+    min_std: float = 0.0
+    """Minimum standard deviation clamp for action noise."""
+
     actor_hidden_dims: list[int] = MISSING
     """The hidden dimensions of the actor network."""
 
     critic_hidden_dims: list[int] = MISSING
     """The hidden dimensions of the critic network."""
+
+    cost_critic_hidden_dims: list[int] | None = None
+    """The hidden dimensions of the cost critic network. Defaults to critic_hidden_dims if None."""
 
     activation: str = MISSING
     """The activation function for the actor and critic networks."""
@@ -37,13 +40,19 @@ class RslRlPpoActorCriticCfg:
 
 @configclass
 class RslRlPpoAlgorithmCfg:
-    """Configuration for the PPO algorithm."""
+    """Configuration for CMDP-capable on-policy algorithms."""
 
-    class_name: str = "PPO"
-    """The algorithm class name. Default is PPO."""
+    name: str = "fppo"
+    """The algorithm name (e.g., 'fppo', 'ppo_lagrange', 'cpo', 'pcpo', 'focpo')."""
+
+    class_name: str | None = None
+    """Optional algorithm class name. Default is None (use name-based selection)."""
 
     value_loss_coef: float = MISSING
     """The coefficient for the value loss."""
+
+    cost_value_loss_coef: float = 1.0
+    """The coefficient for the cost value loss."""
 
     use_clipped_value_loss: bool = MISSING
     """Whether to use clipped value loss."""
@@ -63,6 +72,9 @@ class RslRlPpoAlgorithmCfg:
     learning_rate: float = MISSING
     """The learning rate for the policy."""
 
+    step_size: float = 1e-3
+    """The step size for projected policy updates (FPPO/PCPO)."""
+
     schedule: str = MISSING
     """The learning rate schedule."""
 
@@ -72,8 +84,41 @@ class RslRlPpoAlgorithmCfg:
     lam: float = MISSING
     """The lambda parameter for Generalized Advantage Estimation (GAE)."""
 
+    cost_gamma: float | None = None
+    """The discount factor for costs. Defaults to gamma if None."""
+
+    cost_lam: float | None = None
+    """The GAE lambda for costs. Defaults to lam if None."""
+
+    cost_limit: float = 0.0
+    """The cost limit for CMDP constraints."""
+
     desired_kl: float = MISSING
     """The desired KL divergence."""
+
+    delta_safe: float | None = 0.01
+    """Trust region radius for FPPO step correction. If None, disables backtracking."""
+
+    backtrack_coeff: float = 0.5
+    """Step size decay factor for FPPO backtracking."""
+
+    max_backtracks: int = 10
+    """Maximum number of backtracking steps for FPPO."""
+
+    projection_eps: float = 1e-8
+    """Epsilon used in projection to avoid divide-by-zero."""
+
+    lagrange_lr: float = 1e-2
+    """Learning rate for Lagrange multiplier (PPO-Lagrange)."""
+
+    lagrange_max: float = 100.0
+    """Maximum value for Lagrange multiplier."""
+
+    focpo_eta: float = 0.02
+    """KL threshold for FOCPO-style updates."""
+
+    focpo_lambda: float = 1.0
+    """FOCPO loss scaling parameter."""
 
     max_grad_norm: float = MISSING
     """The maximum gradient norm."""
@@ -84,14 +129,8 @@ class RslRlPpoAlgorithmCfg:
     If True, the advantage is normalized over the entire collected trajectories.
     Otherwise, the advantage is normalized over the mini-batches only.
     """
-
-    symmetry_cfg: RslRlSymmetryCfg | None = None
-    """The symmetry configuration. Default is None, in which case symmetry is not used."""
-
-    rnd_cfg: RslRlRndCfg | None = None
-    """The configuration for the Random Network Distillation (RND) module. Default is None,
-    in which case RND is not used.
-    """
+    normalize_cost_advantage: bool = False
+    """Whether to normalize the cost advantage. Default is False."""
 
 
 @configclass
