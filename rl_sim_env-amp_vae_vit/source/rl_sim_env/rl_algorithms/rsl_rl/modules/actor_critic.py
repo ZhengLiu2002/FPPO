@@ -20,6 +20,8 @@ class ActorCritic(nn.Module):
         num_critic_obs,
         num_actions,
         min_std=0.0,
+        max_std=None,
+        action_mean_clip=None,
         actor_hidden_dims=[256, 256, 256],
         critic_hidden_dims=[256, 256, 256],
         cost_critic_hidden_dims=None,
@@ -98,6 +100,8 @@ class ActorCritic(nn.Module):
         if min_std is None:
             min_std = 0.0
         self.min_std = min_std
+        self.max_std = max_std
+        self.action_mean_clip = action_mean_clip
 
     @staticmethod
     # not used at the moment
@@ -128,6 +132,10 @@ class ActorCritic(nn.Module):
     def update_distribution(self, observations):
         # compute mean
         mean = self.actor(observations)
+        if self.action_mean_clip is not None:
+            clip = abs(self.action_mean_clip)
+            if clip > 0.0:
+                mean = torch.clamp(mean, min=-clip, max=clip)
         # compute standard deviation
         if self.noise_std_type == "scalar":
             std = self.std.expand_as(mean)
@@ -135,7 +143,12 @@ class ActorCritic(nn.Module):
             std = torch.exp(self.log_std).expand_as(mean)
         else:
             raise ValueError(f"Unknown standard deviation type: {self.noise_std_type}. Should be 'scalar' or 'log'")
+        std = torch.nan_to_num(std, nan=self.min_std, posinf=self.min_std, neginf=self.min_std)
         std = torch.clamp(std, min=self.min_std)
+        if self.max_std is not None:
+            max_std = abs(self.max_std)
+            if max_std > 0.0:
+                std = torch.clamp(std, max=max_std)
         # create distribution
         self.distribution = Normal(mean, std)
 
@@ -148,6 +161,10 @@ class ActorCritic(nn.Module):
 
     def act_inference(self, observations):
         actions_mean = self.actor(observations)
+        if self.action_mean_clip is not None:
+            clip = abs(self.action_mean_clip)
+            if clip > 0.0:
+                actions_mean = torch.clamp(actions_mean, min=-clip, max=clip)
         return actions_mean
 
     def evaluate(self, critic_observations, **kwargs):

@@ -205,6 +205,13 @@ class OnPolicyRunner:
                 for _ in range(self.num_steps_per_env):
                     # Sample actions
                     actions = self.alg.act(obs, privileged_obs)
+                    # Optional symmetry cost from policy (strict mirror constraint)
+                    sym_cost = None
+                    base_env = getattr(self.env, "unwrapped", None)
+                    if base_env is None and hasattr(self.env, "env"):
+                        base_env = self.env.env
+                    if base_env is not None and hasattr(base_env, "compute_symmetry_cost"):
+                        sym_cost = base_env.compute_symmetry_cost(self.alg.policy, obs)
                     # Step the environment
                     obs, rewards, dones, infos = self.env.step(actions.to(self.env.device))
                     # Move to device
@@ -220,6 +227,14 @@ class OnPolicyRunner:
 
                     # process the step
                     costs = self._extract_costs(infos, rewards)
+                    if sym_cost is not None:
+                        sym_cost = sym_cost.to(self.device)
+                        if sym_cost.ndim == 1 and costs.ndim > 1:
+                            sym_cost = sym_cost.unsqueeze(-1)
+                        costs = costs + sym_cost
+                        if isinstance(infos, dict):
+                            log = infos.setdefault("log", {})
+                            log["Episode_Cost/symmetric"] = sym_cost
                     self.alg.process_env_step(rewards, dones, infos, costs)
 
                     # book keeping

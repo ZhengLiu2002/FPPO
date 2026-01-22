@@ -25,6 +25,12 @@ class RslRlPpoActorCriticCfg:
     min_std: float = 0.0
     """Minimum standard deviation clamp for action noise."""
 
+    max_std: float | None = None
+    """Maximum standard deviation clamp for action noise. If None, no upper bound is applied."""
+
+    action_mean_clip: float | None = None
+    """Clamp value for action means before sampling/inference. If None, no clipping is applied."""
+
     actor_hidden_dims: list[int] = MISSING
     """The hidden dimensions of the actor network."""
 

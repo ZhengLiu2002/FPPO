@@ -8,8 +8,9 @@ import isaaclab.envs.mdp as mdp                       # 导入标准 MDP 库
 from isaaclab.managers import EventTermCfg as EventTerm # 导入事件项配置
 from isaaclab.managers import SceneEntityCfg            # 导入场景实体配置
 from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
-from rl_sim_env.tasks.manager_based.amp_vae.amp_vae_base_env_cfg import AmpVaeEnvCfg
-from rl_sim_env.tasks.manager_based.amp_vae.config.grq20_v2d3.config_summary import (
+from rl_sim_env.envs.fppo_env import FPPOEnv
+from rl_sim_env.tasks.manager_based.fppo.fppo_base_env_cfg import CostsCfg, FPPOEnvCfg
+from rl_sim_env.tasks.manager_based.fppo.config.grq20_v2d3.config_summary import (
     ROBOT_BASE_LINK,
     ROBOT_CFG,
     ROBOT_FOOT_NAMES,
@@ -29,42 +30,14 @@ from rl_sim_env.tasks.manager_based.common.sensor.ray_caster_config import (
 from rl_sim_env.tasks.manager_based.common.terrain.config import AMP_VAE_TERRAIN_CFG
 from typing import Dict, Tuple
 
-# Helper: instantiate randomize_rigid_body_mass class lazily to avoid passing class directly to EventTerm.
-def randomize_payload_mass_once(
-    env,
-    env_ids,
-    asset_cfg,
-    mass_distribution_params,
-    operation,
-    distribution="uniform",
-    recompute_inertia=True,
-):
-    term = getattr(env, "_randomize_payload_mass_term", None)
-    if term is None:
-        cfg = EventTerm(
-            func=mdp.randomize_rigid_body_mass,
-            mode="reset",
-            params={
-                "asset_cfg": asset_cfg,
-                "mass_distribution_params": mass_distribution_params,
-                "operation": operation,
-                "distribution": distribution,
-                "recompute_inertia": recompute_inertia,
-            },
-        )
-        term = mdp.randomize_rigid_body_mass(cfg=cfg, env=env)
-        env._randomize_payload_mass_term = term
-    term(env, env_ids, asset_cfg=asset_cfg, mass_distribution_params=mass_distribution_params, operation=operation, distribution=distribution, recompute_inertia=recompute_inertia)
-
-# Backward-compat: hydra configs saved earlier may reference this name.
-def _randomize_payload_mass(env, env_ids, **kwargs):
-    return randomize_payload_mass_once(env, env_ids, **kwargs)
-
 @configclass
-class Grq20V2d3AmpVaeEnvCfg(AmpVaeEnvCfg):
+class Grq20V2d3FPPOEnvCfg(FPPOEnvCfg):
+    class_type = FPPOEnv
+
     def __post_init__(self):
         # config summary
         self.config_summary = ConfigSummary
+        self.costs = CostsCfg()
 
         # general settings
         self.decimation = self.config_summary.general.decimation
@@ -108,6 +81,8 @@ class Grq20V2d3AmpVaeEnvCfg(AmpVaeEnvCfg):
         # # command settings
         self._rebuild_command_cfg(self.scene.num_envs)
 
+        leg_joint_cfg = SceneEntityCfg("robot", joint_names=ROBOT_LEG_JOINT_NAMES, preserve_order=True)
+
         # reduce action scale & 仅控制腿部关节（机械臂从动作向量中移除，实现“锁死”）
         self.actions.joint_pos.scale = self.config_summary.action.scale
         self.actions.joint_pos.joint_names = ROBOT_LEG_JOINT_NAMES
@@ -137,6 +112,12 @@ class Grq20V2d3AmpVaeEnvCfg(AmpVaeEnvCfg):
         self.observations.actor_obs.velocity_commands.params["scale"] = (
             self.config_summary.observation.scale.vel_command
         )
+        # align joint observation ordering with action joints for symmetry
+        self.observations.actor_obs.joint_pos.params["asset_cfg"] = leg_joint_cfg
+        self.observations.actor_obs.joint_vel.params["asset_cfg"] = leg_joint_cfg
+        self.observations.critic_obs.joint_pos.params["asset_cfg"] = leg_joint_cfg
+        self.observations.critic_obs.joint_vel.params["asset_cfg"] = leg_joint_cfg
+
 
     def _compute_command_ids_and_ranges(self, num_envs: int) -> Tuple[Dict[str, list[int]], Dict[str, object]]:
         """Split env ids across terrains, ensuring full coverage even when num_envs is overridden."""
@@ -178,6 +159,7 @@ class Grq20V2d3AmpVaeEnvCfg(AmpVaeEnvCfg):
             max_ang_z_level=self.config_summary.command.max_ang_z_level,
             heading_control_stiffness=self.config_summary.command.heading_control_stiffness,
         )
+        leg_joint_cfg = SceneEntityCfg("robot", joint_names=ROBOT_LEG_JOINT_NAMES, preserve_order=True)
         self.observations.actor_obs.joint_pos.scale = self.config_summary.observation.scale.joint_pos
         self.observations.actor_obs.joint_vel.scale = self.config_summary.observation.scale.joint_vel
         # Drop auxiliary critic terms (push_vel, random material/mass/com) to match the 250-dim critic_obs used in training
@@ -185,11 +167,6 @@ class Grq20V2d3AmpVaeEnvCfg(AmpVaeEnvCfg):
         self.observations.critic_obs.random_material = None
         self.observations.critic_obs.random_com = None
         self.observations.critic_obs.random_mass = None
-        # Only feed the 12 leg joints into AMP (motion files do not contain arm data)
-        leg_joint_cfg = SceneEntityCfg("robot", joint_names=ROBOT_LEG_JOINT_NAMES, preserve_order=True)
-        self.observations.amp_obs.joint_pos.params = {"asset_cfg": leg_joint_cfg}
-        self.observations.amp_obs.joint_vel.params = {"asset_cfg": leg_joint_cfg}
-
         # noise
         base_ang_vel_noise = self.config_summary.observation.noise.base_ang_vel
         gravity_noise = self.config_summary.observation.noise.projected_gravity
@@ -234,7 +211,7 @@ class Grq20V2d3AmpVaeEnvCfg(AmpVaeEnvCfg):
         self.events.reset_base.params["pose_range"] = self.config_summary.event.reset_base_pose
         self.events.reset_base.params["velocity_range"] = self.config_summary.event.reset_base_velocity
 
-        # 只随机腿部关节，机械臂由专门的随机化事件控制
+        # Only randomize leg joints.
         self.events.reset_robot_joints.params["position_range"] = self.config_summary.event.reset_robot_joints
         self.events.reset_robot_joints.params["asset_cfg"] = SceneEntityCfg("robot", joint_names=ROBOT_LEG_JOINT_NAMES)
 
@@ -249,115 +226,125 @@ class Grq20V2d3AmpVaeEnvCfg(AmpVaeEnvCfg):
         )
 
         self.events.push_robot.params["velocity_range"] = self.config_summary.event.push_robot_vel
+        self.events.push_robot.params["velocity_schedule"] = self.config_summary.event.push_robot_schedule
 
         # rewards
-        self.rewards.track_lin_vel_xy_exp.weight = self.config_summary.reward.track_lin_vel_xy_exp.weight
-        self.rewards.track_lin_vel_xy_exp.params["std"] = self.config_summary.reward.track_lin_vel_xy_exp.std
+        self.rewards.command_tracking.weight = self.config_summary.reward.command_tracking.weight
+        self.rewards.command_tracking.params["kappa_lin"] = self.config_summary.reward.command_tracking.kappa_lin
+        self.rewards.command_tracking.params["kappa_ang"] = self.config_summary.reward.command_tracking.kappa_ang
 
-        self.rewards.track_ang_vel_z_exp.weight = self.config_summary.reward.track_ang_vel_z_exp.weight
-        self.rewards.track_ang_vel_z_exp.params["std"] = self.config_summary.reward.track_ang_vel_z_exp.std
+        self.rewards.joint_torque_l2.weight = -self.config_summary.reward.joint_torque.weight
+        self.rewards.joint_torque_l2.params["ref_mass"] = self.config_summary.reward.joint_torque.ref_mass
+        self.rewards.joint_torque_l2.params["ref_weight"] = self.config_summary.reward.joint_torque.ref_weight
+        self.rewards.joint_torque_l2.params["asset_cfg"] = leg_joint_cfg
 
-        # self.rewards.base_height_l2.weight = self.config_summary.reward.base_height_l2.weight
-        # self.rewards.base_height_l2.params["target_height"] = self.config_summary.reward.base_height_l2.target_height
-        # self.rewards.base_height_l2.params["asset_cfg"].body_names = ROBOT_BASE_LINK
+        self.rewards.action_smoothness.weight = -self.config_summary.reward.action_smoothness.weight
+        self.rewards.action_smoothness.params["action_diff_weight"] = (
+            self.config_summary.reward.action_smoothness.action_diff_weight
+        )
+        self.rewards.action_smoothness.params["action_diff2_weight"] = (
+            self.config_summary.reward.action_smoothness.action_diff2_weight
+        )
+        self.rewards.action_smoothness.params["joint_vel_weight"] = (
+            self.config_summary.reward.action_smoothness.joint_vel_weight
+        )
+        self.rewards.action_smoothness.params["asset_cfg"] = leg_joint_cfg
 
-        self.rewards.orientation_l2.weight = self.config_summary.reward.orientation_l2.weight
-        self.rewards.orientation_l2.params["asset_cfg"].body_names = ROBOT_BASE_LINK
+        # costs
+        self.costs.prob_joint_pos.weight = self.config_summary.cost.prob_joint_pos.weight
+        self.costs.prob_joint_pos.params["margin"] = self.config_summary.cost.prob_joint_pos.margin
+        self.costs.prob_joint_pos.params["limit"] = self.config_summary.cost.prob_joint_pos.limit
+        self.costs.prob_joint_pos.params["asset_cfg"] = leg_joint_cfg
 
-        self.rewards.lin_vel_z_l2.weight = self.config_summary.reward.lin_vel_z_l2.weight
+        self.costs.prob_joint_vel.weight = self.config_summary.cost.prob_joint_vel.weight
+        self.costs.prob_joint_vel.params["limit"] = self.config_summary.cost.prob_joint_vel.velocity_limit
+        self.costs.prob_joint_vel.params["cost_limit"] = self.config_summary.cost.prob_joint_vel.limit
+        self.costs.prob_joint_vel.params["asset_cfg"] = leg_joint_cfg
 
-        self.rewards.ang_vel_xy_l2.weight = self.config_summary.reward.ang_vel_xy_l2.weight
+        self.costs.prob_joint_torque.weight = self.config_summary.cost.prob_joint_torque.weight
+        self.costs.prob_joint_torque.params["limit"] = self.config_summary.cost.prob_joint_torque.torque_limit
+        self.costs.prob_joint_torque.params["cost_limit"] = self.config_summary.cost.prob_joint_torque.limit
+        self.costs.prob_joint_torque.params["asset_cfg"] = leg_joint_cfg
 
-        self.rewards.dof_torques_l2.weight = self.config_summary.reward.dof_torques_l2.weight
+        self.costs.prob_body_contact.weight = self.config_summary.cost.prob_body_contact.weight
+        self.costs.prob_body_contact.params["foot_body_names"] = ROBOT_FOOT_NAMES
+        self.costs.prob_body_contact.params["threshold"] = self.config_summary.cost.prob_body_contact.contact_force_threshold
+        self.costs.prob_body_contact.params["limit"] = self.config_summary.cost.prob_body_contact.limit
 
-        self.rewards.dof_vel_l2.weight = self.config_summary.reward.dof_vel_l2.weight
+        self.costs.prob_com_frame.weight = self.config_summary.cost.prob_com_frame.weight
+        self.costs.prob_com_frame.params["height_range"] = self.config_summary.cost.prob_com_frame.height_range
+        self.costs.prob_com_frame.params["max_angle_rad"] = self.config_summary.cost.prob_com_frame.max_angle_rad
+        self.costs.prob_com_frame.params["cost_limit"] = self.config_summary.cost.prob_com_frame.limit
+        self.costs.prob_com_frame.params["terrain_sensor_cfg"] = SceneEntityCfg("height_scanner")
+        self.costs.prob_com_frame.params["height_offset"] = 0.0
 
-        self.rewards.dof_acc_l2.weight = self.config_summary.reward.dof_acc_l2.weight
+        self.costs.prob_gait_pattern.weight = self.config_summary.cost.prob_gait_pattern.weight
+        self.costs.prob_gait_pattern.params["foot_body_names"] = ROBOT_FOOT_NAMES
+        self.costs.prob_gait_pattern.params["gait_frequency"] = self.config_summary.cost.prob_gait_pattern.gait_frequency
+        self.costs.prob_gait_pattern.params["min_frequency"] = self.config_summary.cost.prob_gait_pattern.min_frequency
+        self.costs.prob_gait_pattern.params["max_frequency"] = self.config_summary.cost.prob_gait_pattern.max_frequency
+        self.costs.prob_gait_pattern.params["max_command_speed"] = (
+            self.config_summary.cost.prob_gait_pattern.max_command_speed
+        )
+        self.costs.prob_gait_pattern.params["frequency_scale"] = (
+            self.config_summary.cost.prob_gait_pattern.frequency_scale
+        )
+        self.costs.prob_gait_pattern.params["command_name"] = "base_velocity"
+        self.costs.prob_gait_pattern.params["min_command_speed"] = (
+            self.config_summary.cost.prob_gait_pattern.min_command_speed
+        )
+        self.costs.prob_gait_pattern.params["min_base_speed"] = (
+            self.config_summary.cost.prob_gait_pattern.min_base_speed
+        )
+        self.costs.prob_gait_pattern.params["asset_cfg"] = SceneEntityCfg("robot")
+        self.costs.prob_gait_pattern.params["phase_offsets"] = self.config_summary.cost.prob_gait_pattern.phase_offsets
+        self.costs.prob_gait_pattern.params["stance_ratio"] = self.config_summary.cost.prob_gait_pattern.stance_ratio
+        self.costs.prob_gait_pattern.params["contact_threshold"] = (
+            self.config_summary.cost.prob_gait_pattern.contact_force_threshold
+        )
+        self.costs.prob_gait_pattern.params["limit"] = self.config_summary.cost.prob_gait_pattern.limit
 
-        self.rewards.action_rate_l2.weight = self.config_summary.reward.action_rate_l2.weight
+        self.costs.orthogonal_velocity.weight = self.config_summary.cost.orthogonal_velocity.weight
+        self.costs.orthogonal_velocity.params["limit"] = self.config_summary.cost.orthogonal_velocity.limit
 
-        self.rewards.action_smoothness_l2.weight = self.config_summary.reward.action_smoothness_l2.weight
+        self.costs.contact_velocity.weight = self.config_summary.cost.contact_velocity.weight
+        self.costs.contact_velocity.params["foot_body_names"] = ROBOT_FOOT_NAMES
+        self.costs.contact_velocity.params["contact_threshold"] = self.config_summary.cost.contact_velocity.contact_force_threshold
+        self.costs.contact_velocity.params["limit"] = self.config_summary.cost.contact_velocity.limit
 
-        self.rewards.joint_power.weight = self.config_summary.reward.joint_power.weight
-        self.rewards.joint_power.params["asset_cfg"] = leg_joint_cfg
+        self.costs.foot_clearance.weight = self.config_summary.cost.foot_clearance.weight
+        self.costs.foot_clearance.params["foot_body_names"] = ROBOT_FOOT_NAMES
+        self.costs.foot_clearance.params["min_height"] = self.config_summary.cost.foot_clearance.min_height
+        self.costs.foot_clearance.params["height_offset"] = 0.0
+        self.costs.foot_clearance.params["contact_threshold"] = self.config_summary.cost.contact_velocity.contact_force_threshold
+        self.costs.foot_clearance.params["gait_frequency"] = self.config_summary.cost.prob_gait_pattern.gait_frequency
+        self.costs.foot_clearance.params["phase_offsets"] = self.config_summary.cost.prob_gait_pattern.phase_offsets
+        self.costs.foot_clearance.params["stance_ratio"] = self.config_summary.cost.prob_gait_pattern.stance_ratio
+        self.costs.foot_clearance.params["terrain_sensor_cfg"] = SceneEntityCfg("height_scanner")
+        self.costs.foot_clearance.params["limit"] = self.config_summary.cost.foot_clearance.limit
 
-        self.rewards.joint_power_distribution.weight = self.config_summary.reward.joint_power_distribution.weight
-        self.rewards.joint_power_distribution.params["asset_cfg"] = leg_joint_cfg
-        # limit torque/velocity/acc penalties to leg joints
-        self.rewards.dof_torques_l2.params = {"asset_cfg": leg_joint_cfg}
-        self.rewards.dof_vel_l2.params = {"asset_cfg": leg_joint_cfg}
-        self.rewards.dof_acc_l2.params = {"asset_cfg": leg_joint_cfg}
+        self.costs.foot_height_limit.weight = self.config_summary.cost.foot_height_limit.weight
+        self.costs.foot_height_limit.params["foot_body_names"] = ROBOT_FOOT_NAMES
+        self.costs.foot_height_limit.params["height_offset"] = 0.0
+        self.costs.foot_height_limit.params["terrain_sensor_cfg"] = SceneEntityCfg("height_scanner")
+        self.costs.foot_height_limit.params["limit"] = self.config_summary.cost.foot_height_limit.limit
 
-        self.rewards.feet_air_time.weight = self.config_summary.reward.feet_air_time.weight
-        self.rewards.feet_air_time.params["threshold"] = self.config_summary.reward.feet_air_time.threshold
-        self.rewards.feet_air_time.params["sensor_cfg"].body_names = ".*_foot"
-
-        self.rewards.undesired_contacts.weight = self.config_summary.reward.undesired_contacts.weight
-        self.rewards.undesired_contacts.params["sensor_cfg"].body_names = [".*thigh", ".*calf"]
-
-        self.rewards.feet_slide.weight = self.config_summary.reward.feet_slide.weight
-        self.rewards.feet_slide.params["asset_cfg"].body_names = ".*_foot"
-        self.rewards.feet_slide.params["sensor_cfg"].body_names = ".*_foot"
-
-        # self.rewards.stand_joint_deviation_l1.weight = self.config_summary.reward.stand_joint_deviation_l1.weight
-        # self.rewards.stand_joint_deviation_l1.params["asset_cfg"].joint_names = ".*_joint"
-
-        # self.rewards.dof_pos_limits.weight = self.config_summary.reward.dof_pos_limits.weight
-
-        # self.rewards.dof_vel_limits.weight = self.config_summary.reward.dof_vel_limits.weight
-        # self.rewards.dof_vel_limits.params["soft_ratio"] = self.config_summary.reward.dof_vel_limits.soft_ratio
-
-        # self.rewards.applied_torque_limits.weight = self.config_summary.reward.applied_torque_limits.weight
-
-        self.rewards.amp_reward.weight = self.config_summary.reward.amp_reward.weight
+        self.costs.symmetric.weight = self.config_summary.cost.symmetric.weight
+        self.costs.symmetric.params["joint_pair_indices"] = self.config_summary.cost.symmetric.joint_pairs
+        self.costs.symmetric.params["action_pair_indices"] = self.config_summary.cost.symmetric.joint_pairs
+        self.costs.symmetric.params["asset_cfg"] = leg_joint_cfg
+        self.costs.symmetric.params["command_name"] = "base_velocity"
+        self.costs.symmetric.params["min_command_speed"] = self.config_summary.cost.symmetric.min_command_speed
+        self.costs.symmetric.params["min_base_speed"] = self.config_summary.cost.symmetric.min_base_speed
+        self.costs.symmetric.params["limit"] = self.config_summary.cost.symmetric.limit
+        # Symmetry cost is computed on-policy using mirrored observations; disable env-side proxy.
+        self.costs.symmetric.weight = 0.0
 
         # terminations
         self.terminations.base_contact.params["sensor_cfg"].body_names = ROBOT_BASE_LINK
 
-        # === 新增：训练时的机械臂随机化配置 ===
-        
-        # 1. 随机旋转角度 (-180度 到 180度)
-        # 解释：Reset时，机械臂会在圆周上随机选一个角度。
-        # 由于 stiffness=0，它初始化在哪里，就会停在哪里。
-        self.events.reset_arm_angle = EventTerm(
-            func=mdp.reset_joints_by_offset,
-            mode="reset",
-            params={
-                "position_range": (-3.14, 3.14),
-                "velocity_range": (0.0, 0.0),
-                "asset_cfg": SceneEntityCfg("robot", joint_names=["arm_base_joint"]),
-            },
-        )
-
-        # 2. 随机杆长 (0.6m 到 0.8m)
-        # 解释：Reset时，机械臂长度随机伸缩。
-        self.events.randomize_arm_length = EventTerm(
-            func=mdp.reset_joints_by_offset,
-            mode="reset",
-            params={
-                # 这里用“相对偏移”到默认值 0.6，所以偏移范围设置为 -0.2~0.2
-                "position_range": (-0.2, 0.2),
-                "velocity_range": (0.0, 0.0),
-                "asset_cfg": SceneEntityCfg("robot", joint_names=["arm_length_joint"]),
-            },
-        )
-
-        # 3. 随机负载质量 (4kg 到 7kg)
-        # 解释：Reset时，改变末端负载的物理属性。
-        self.events.randomize_payload_mass = EventTerm(
-            func=randomize_payload_mass_once,
-            mode="reset",
-            params={
-                "asset_cfg": SceneEntityCfg("robot", body_names=["arm_load_link"]),
-                "mass_distribution_params": (4.0, 7.0),
-                # use "abs" to set absolute mass uniformly in range
-                "operation": "abs",
-            },
-        )
-
-
 @configclass
-class Grq20V2d3AmpVaeEnvCfg_PLAY(Grq20V2d3AmpVaeEnvCfg):
+class Grq20V2d3FPPOEnvCfg_PLAY(Grq20V2d3FPPOEnvCfg):
     def __post_init__(self):
         # post init of parent
         super().__post_init__()
@@ -372,11 +359,6 @@ class Grq20V2d3AmpVaeEnvCfg_PLAY(Grq20V2d3AmpVaeEnvCfg):
             self.scene.terrain.terrain_generator.num_rows = 5
             self.scene.terrain.terrain_generator.num_cols = 5
             self.scene.terrain.terrain_generator.curriculum = False
-
-        # Only feed the leg joints into AMP (motion files do not contain arm data)
-        leg_joint_cfg = SceneEntityCfg("robot", joint_names=ROBOT_LEG_JOINT_NAMES, preserve_order=True)
-        self.observations.amp_obs.joint_pos.params = {"asset_cfg": leg_joint_cfg}
-        self.observations.amp_obs.joint_vel.params = {"asset_cfg": leg_joint_cfg}
 
         command_ids = dict()
         command_ranges = dict()
@@ -399,7 +381,7 @@ class Grq20V2d3AmpVaeEnvCfg_PLAY(Grq20V2d3AmpVaeEnvCfg):
         # disable randomization for play
         self.observations.critic_obs.enable_corruption = False
         self.observations.actor_obs.enable_corruption = False
-        self.observations.amp_obs.enable_corruption = False
+        leg_joint_cfg = SceneEntityCfg("robot", joint_names=ROBOT_LEG_JOINT_NAMES, preserve_order=True)
         # remove random pushing event
         self.events.add_base_mass = None
         self.events.base_com_randomization = None
@@ -407,53 +389,5 @@ class Grq20V2d3AmpVaeEnvCfg_PLAY(Grq20V2d3AmpVaeEnvCfg):
         self.events.reset_actuator_gains = None
         self.events.reset_robot_joints = None
         self.events.push_robot = None
-        self.rewards.amp_reward = None
-
-        # 1. 随机旋转角度 (-180度 到 180度)
-        self.events.reset_arm_angle = EventTerm(
-            func=mdp.reset_joints_by_offset,
-            mode="reset",
-            params={
-                "position_range": (-3.14, 3.14),
-                "velocity_range": (0.0, 0.0),
-                "asset_cfg": SceneEntityCfg("robot", joint_names=["arm_base_joint"]),
-            },
-        )
-
-        # 2. 随机杆长 (60cm 到 80cm)
-        # 注意：这里我们修改的是 Prismatic 关节的位置
-        self.events.randomize_arm_length = EventTerm(
-            func=mdp.reset_joints_by_offset,
-            mode="reset",
-            params={
-                # 偏移到默认值 0.6 上，得到 0.6~0.8 的绝对长度
-                "position_range": (0.0, 0.2), 
-                "velocity_range": (0.0, 0.0),
-                "asset_cfg": SceneEntityCfg("robot", joint_names=["arm_length_joint"]),
-            },
-        )
-
-        # 3. 随机负载质量 (4kg 到 7kg)
-        self.events.randomize_payload_mass = EventTerm(
-            func=randomize_payload_mass_once,
-            mode="reset",
-            params={
-                "asset_cfg": SceneEntityCfg("robot", body_names=["arm_load_link"]),
-                "mass_distribution_params": (4.0, 7.0),
-                "operation": "abs",
-            },
-        )
-
-class Grq20V2d3AmpVaeEnvCfg_REPLAY_AMPDATA(Grq20V2d3AmpVaeEnvCfg_PLAY):
-    def __post_init__(self):
-        super().__post_init__()
-        self.scene.terrain.terrain_type = "plane"
-        self.scene.terrain.terrain_generator = None
-        self.rewards = None
-        self.scene.height_scanner = None
-        self.observations.critic_obs.height_scan = None
-        # no height scan
-        # self.scene.height_scanner = None
-        # self.observations.critic_obs.height_scan = None
-        # no terrain curriculum
-        self.curriculum.terrain_levels = None
+        self.costs.prob_joint_torque.params["asset_cfg"] = leg_joint_cfg
+        self.costs.symmetric.params["asset_cfg"] = leg_joint_cfg

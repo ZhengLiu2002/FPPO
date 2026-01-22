@@ -37,6 +37,7 @@ def push_by_setting_velocity_obs_xy(
     env: ManagerBasedEnv,
     env_ids: torch.Tensor,
     velocity_range: dict[str, tuple[float, float]],
+    velocity_schedule: list[dict[str, object]] | None = None,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ):
     """Push the asset by setting the root velocity to a random value within the given ranges.
@@ -50,6 +51,25 @@ def push_by_setting_velocity_obs_xy(
     """
     # extract the used quantities (to enable type-hinting)
     asset: RigidObject | Articulation = env.scene[asset_cfg.name]
+
+    # ensure push velocity buffer exists even if the observation term is disabled
+    if not hasattr(env, "event_push_vel_buf"):
+        num_envs = env.scene.num_envs
+        env.event_push_vel_buf = torch.zeros((num_envs, 2), device=asset.device, dtype=torch.float32)
+
+    # resolve staged velocity schedule if provided
+    if velocity_schedule:
+        step_count = getattr(env, "common_step_counter", 0)
+        chosen = velocity_range
+        # sort by step threshold
+        for stage in sorted(velocity_schedule, key=lambda item: int(item.get("steps", 0))):
+            if step_count >= int(stage.get("steps", 0)):
+                stage_range = stage.get("velocity_range", None)
+                if isinstance(stage_range, dict):
+                    chosen = stage_range
+            else:
+                break
+        velocity_range = chosen
 
     # velocities
     vel_w = asset.data.root_vel_w[env_ids]

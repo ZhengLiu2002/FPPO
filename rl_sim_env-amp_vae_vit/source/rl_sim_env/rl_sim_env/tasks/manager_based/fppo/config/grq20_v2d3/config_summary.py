@@ -5,12 +5,9 @@ from rl_sim_env import RL_SIM_ENV_ROOT_DIR
 from rl_sim_env.tasks.manager_based.common.mdp import UniformVelocityCommandTerrainCfg
 
 RL_SIM_ENV_ASSETS_DIR = os.path.join(RL_SIM_ENV_ROOT_DIR, "assets")
-RL_SIM_ENV_DATASETS_DIR = os.path.join(RL_SIM_ENV_ROOT_DIR, "datasets")
-
-import glob
 
 import isaaclab.sim as sim_utils
-from isaaclab.actuators import DCMotorCfg, DelayedPDActuatorCfg, IdealPDActuatorCfg
+from isaaclab.actuators import DelayedPDActuatorCfg
 from isaaclab.assets.articulation import ArticulationCfg
 from isaaclab.utils import configclass
 from rl_algorithms.rsl_rl_wrapper import (
@@ -21,10 +18,44 @@ from rl_algorithms.rsl_rl_wrapper import (
 
 ROBOT_BASE_LINK = "base_link"
 ROBOT_FOOT_NAMES = ["FL_foot", "FR_foot", "RL_foot", "RR_foot"]
+ROBOT_LEG_JOINT_NAMES = [
+    "FL_hip_joint",
+    "FR_hip_joint",
+    "RL_hip_joint",
+    "RR_hip_joint",
+    "FL_thigh_joint",
+    "FR_thigh_joint",
+    "RL_thigh_joint",
+    "RR_thigh_joint",
+    "FL_calf_joint",
+    "FR_calf_joint",
+    "RL_calf_joint",
+    "RR_calf_joint",
+]
 
 ROBOT_CFG = ArticulationCfg(
-    spawn=sim_utils.UsdFileCfg(
-        usd_path=f"{RL_SIM_ENV_ASSETS_DIR}/robots/galileo_e1_v1d6_e1r/e1_v1d6_e1r.usd",
+    spawn=sim_utils.UrdfFileCfg(
+        asset_path=os.path.join(
+            RL_SIM_ENV_ASSETS_DIR, "robots", "galileo_grq20_v2d3", "grq20_v2d3_default.urdf"
+        ),
+        usd_dir=os.path.join(RL_SIM_ENV_ASSETS_DIR, "robots", "galileo_grq20_v2d3"),
+        usd_file_name="grq20_v2d3_default.usd",
+        force_usd_conversion=True,
+        make_instanceable=True,
+        fix_base=False,
+        root_link_name=None,
+        link_density=0.0,
+        merge_fixed_joints=False,
+        convert_mimic_joints_to_normal_joints=False,
+        joint_drive=sim_utils.UrdfConverterCfg.JointDriveCfg(
+            drive_type="force",
+            target_type="position",
+            gains=sim_utils.UrdfConverterCfg.JointDriveCfg.PDGainsCfg(stiffness=100.0, damping=1.0),
+        ),
+        collision_from_visuals=False,
+        collider_type="convex_hull",
+        self_collision=False,
+        replace_cylinders_with_capsules=False,
         activate_contact_sensors=True,
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             disable_gravity=False,
@@ -57,7 +88,7 @@ ROBOT_CFG = ArticulationCfg(
         },
         joint_vel={".*": 0.0},
     ),
-    soft_joint_pos_limit_factor=0.9,
+    soft_joint_pos_limit_factor=1.0,
     # todo_liz: friction=0.05, armature=0.01
     actuators={
         "base_legs": DelayedPDActuatorCfg(
@@ -86,35 +117,84 @@ class ConfigSummary:
     class sim:
         dt = 0.0025
 
-    class amp:
-        motion_files = glob.glob(f"{RL_SIM_ENV_DATASETS_DIR}/grq20_v1d6/0417/npz/*")
-        num_preload_transitions = 2000000
-        discr_hidden_dims = [1024, 512]
-
     class env:
-        num_envs = 20
-        num_actor_obs = 45
-        num_critic_obs = 48 + 196  # base_lin_vel*3 + base_ang_vel*3 +  projected_gravity*3 + commands*3 + dof_pos*12 + dof_vel*12 + actions*12
-        num_amp_obs = 39  # joint_pos*12 + foot_pos*12 + base_lin_vel*3 + base_ang_vel*3 + joint_vel*12 + pos_z *1
-        num_vae_obs = 45  # num_actor_obs
-        obs_history_length = 5
-        num_vae_out = 20  # code_vel*3 + mass*1 + latent*16
+        num_envs = 4096
+        # Policy controls the 12 leg joints only.
         num_actions = 12
-        action_history_length = 3
-        clip_actions = 100.0
+        # base_ang_vel*3 + projected_gravity*3 + joint_pos*14 + joint_vel*14 + actions*12 + commands*3
+        num_actor_obs = 49
+        # base_lin_vel*3 + base_ang_vel*3 + projected_gravity*3 + commands*3 + joint_pos*14 + joint_vel*14 + actions*12 + height_scan*187
+        num_critic_obs = 239
+        clip_actions = 1.0
         clip_obs = 100.0
 
-    class constraint:
-        joint_pos_margin = 0.3
-        joint_vel_limit = 50.0
-        joint_torque_limit = 100.0
-        com_max_angle_rad = 0.35
-        cost_keys = [
-            "constraint_joint_pos",
-            "constraint_joint_vel",
-            "constraint_joint_torque",
-            "constraint_com_orientation",
-        ]
+    class cost:
+        class prob_joint_pos:
+            weight = 1.0
+            margin = -0.05
+            limit = 1.0
+
+        class prob_joint_vel:
+            weight = 1.0
+            velocity_limit = 16.0
+            limit = 1.0
+
+        class prob_joint_torque:
+            weight = 1.0
+            torque_limit = 120.0
+            limit = 1.0
+
+        class prob_body_contact:
+            weight = 0.1
+            contact_force_threshold = 10.0
+            limit = 5.0
+
+        class prob_com_frame:
+            weight = 0.1
+            height_range = (0.1, 1.1)
+            max_angle_rad = 1.0
+            limit = 5.0
+
+        class prob_gait_pattern:
+            weight = 0.1
+            gait_frequency = 1.5
+            min_frequency = None
+            max_frequency = None
+            max_command_speed = None
+            frequency_scale = 0.0
+            min_command_speed = None
+            min_base_speed = None
+            stance_ratio = 0.5
+            phase_offsets = [0.0, 0.5, 0.5, 0.0]
+            contact_force_threshold = 1.0
+            limit = 5.0
+
+        class orthogonal_velocity:
+            weight = 0.3
+            limit = 3.0
+
+        class contact_velocity:
+            weight = 1.0
+            contact_force_threshold = 1.0
+            limit = 0.8
+
+        class foot_clearance:
+            weight = 1.0
+            min_height = None
+            limit = 0.08
+
+        class foot_height_limit:
+            weight = 0.3
+            limit = 0.4
+
+        class symmetric:
+            weight = 0.1
+            limit = 5.0
+            min_command_speed = None
+            min_base_speed = None
+            joint_pairs = [(0, 1), (2, 3), (4, 5), (6, 7), (8, 9), (10, 11)]
+
+        total_limit = 25.0
 
     class command:
         lin_x_level: float = 0.0
@@ -130,9 +210,9 @@ class ConfigSummary:
                 lin_vel_y=(-0.5, 0.5),
                 ang_vel_z=(-0.25, 0.25),
                 heading=(-math.pi / 2, math.pi / 2),
-                heading_command_prob=0.7,
+                heading_command_prob=1.0,
                 yaw_command_prob=0.0,
-                standing_command_prob=0.05,
+                standing_command_prob=0.0,
                 start_curriculum_lin_x=(-0.5, 0.5),
                 start_curriculum_ang_z=(-0.25, 0.25),
                 max_curriculum_lin_x=(-0.8, 0.8),
@@ -143,9 +223,9 @@ class ConfigSummary:
                 lin_vel_y=(-0.5, 0.5),
                 ang_vel_z=(-0.25, 0.25),
                 heading=(-math.pi / 2, math.pi / 2),
-                heading_command_prob=0.7,
+                heading_command_prob=1.0,
                 yaw_command_prob=0.0,
-                standing_command_prob=0.05,
+                standing_command_prob=0.0,
                 start_curriculum_lin_x=(0.0, 0.5),
                 start_curriculum_ang_z=(-0.25, 0.25),
                 max_curriculum_lin_x=(0.0, 0.8),
@@ -156,9 +236,9 @@ class ConfigSummary:
                 lin_vel_y=(-0.5, 0.5),
                 ang_vel_z=(-0.25, 0.25),
                 heading=(-math.pi / 2, math.pi / 2),
-                heading_command_prob=0.7,
+                heading_command_prob=1.0,
                 yaw_command_prob=0.0,
-                standing_command_prob=0.05,
+                standing_command_prob=0.0,
                 start_curriculum_lin_x=(0.0, 0.5),
                 start_curriculum_ang_z=(-0.25, 0.25),
                 max_curriculum_lin_x=(0.0, 0.8),
@@ -169,9 +249,9 @@ class ConfigSummary:
                 lin_vel_y=(-0.5, 0.5),
                 ang_vel_z=(-0.25, 0.25),
                 heading=(-math.pi / 2, math.pi / 2),
-                heading_command_prob=0.7,
+                heading_command_prob=1.0,
                 yaw_command_prob=0.0,
-                standing_command_prob=0.05,
+                standing_command_prob=0.0,
                 start_curriculum_lin_x=(-0.5, 0.5),
                 start_curriculum_ang_z=(-0.25, 0.25),
                 max_curriculum_lin_x=(-1.0, 1.0),
@@ -182,9 +262,9 @@ class ConfigSummary:
                 lin_vel_y=(-0.5, 0.5),
                 ang_vel_z=(-0.25, 0.25),
                 heading=(-math.pi / 2, math.pi / 2),
-                heading_command_prob=0.7,
+                heading_command_prob=1.0,
                 yaw_command_prob=0.0,
-                standing_command_prob=0.05,
+                standing_command_prob=0.0,
                 start_curriculum_lin_x=(-0.5, 0.5),
                 start_curriculum_ang_z=(-0.25, 0.25),
                 max_curriculum_lin_x=(-1.0, 1.0),
@@ -195,9 +275,9 @@ class ConfigSummary:
                 lin_vel_y=(-0.5, 0.5),
                 ang_vel_z=(-0.25, 0.25),
                 heading=(-math.pi / 2, math.pi / 2),
-                heading_command_prob=0.7,
+                heading_command_prob=1.0,
                 yaw_command_prob=0.0,
-                standing_command_prob=0.05,
+                standing_command_prob=0.0,
                 start_curriculum_lin_x=(-0.5, 0.5),
                 start_curriculum_ang_z=(-0.25, 0.25),
                 max_curriculum_lin_x=(-1.0, 1.0),
@@ -208,9 +288,9 @@ class ConfigSummary:
                 lin_vel_y=(-0.5, 0.5),
                 ang_vel_z=(-0.25, 0.25),
                 heading=(-math.pi / 2, math.pi / 2),
-                heading_command_prob=0.0,
-                yaw_command_prob=0.5,
-                standing_command_prob=0.05,
+                heading_command_prob=1.0,
+                yaw_command_prob=0.0,
+                standing_command_prob=0.0,
                 start_curriculum_lin_x=(-0.5, 0.5),
                 start_curriculum_ang_z=(-0.25, 0.25),
                 max_curriculum_lin_x=(-1.2, 1.2),
@@ -245,7 +325,7 @@ class ConfigSummary:
         }
 
     class action:
-        scale = 0.25
+        scale = 0.4
 
     class observation:
         class delay:
@@ -275,8 +355,8 @@ class ConfigSummary:
             height_measurements = (-1.0, 1.0)
 
     class event:
-        randomize_base_mass = (-3.0, 15.0)
-        randomize_base_com = {"x": (-0.15, 0.15), "y": (-0.08, 0.08), "z": (-0.05, 0.15)}
+        randomize_base_mass = (-3.0, 5.0)
+        randomize_base_com = {"x": (-0.05, 0.05), "y": (-0.03, 0.03), "z": (-0.03, 0.05)}
         randomize_static_friction = (0.25, 1.2)
         randomize_dynamic_friction = (0.25, 1.2)
         randomize_restitution = (0.0, 1.0)
@@ -289,97 +369,53 @@ class ConfigSummary:
             "pitch": (0.0, 0.0),
             "yaw": (0.0, 0.0),
         }
-        reset_robot_joints = (-0.6, 0.6)
+        reset_robot_joints = (-0.2, 0.2)
         randomize_actuator_kp_gains = (0.8, 1.2)
         randomize_actuator_kd_gains = (0.8, 1.2)
         randomize_actuator_kt_gains = (0.8, 1.2)
         push_robot_vel = {"x": (-1.0, 1.0), "y": (-1.0, 1.0)}
+        # staged curriculum for push velocity (common_step_counter based)
+        push_robot_schedule = [
+            {"steps": 0, "velocity_range": {"x": (-0.3, 0.3), "y": (-0.3, 0.3)}},
+            {"steps": 100000, "velocity_range": {"x": (-0.6, 0.6), "y": (-0.6, 0.6)}},
+            {"steps": 300000, "velocity_range": {"x": (-1.0, 1.0), "y": (-1.0, 1.0)}},
+        ]
 
     class reward:
-        only_positive_reward = True
+        class command_tracking:
+            weight = 10
+            kappa_lin = 1.5
+            kappa_ang = 1.5
 
-        class track_lin_vel_xy_exp:
-            weight = 1.5
-            std = math.sqrt(0.25)
+        class joint_torque:
+            weight = 1e-6
+            ref_mass = None
+            ref_weight = 1.0
 
-        class track_ang_vel_z_exp:
-            weight = 0.5
-            std = math.sqrt(0.25)
-
-        # class base_height_l2:
-        #     weight = 0.0
-        #     target_height = 0.426
-
-        class orientation_l2:
-            weight = -0.1
-
-        class lin_vel_z_l2:
-            weight = -2.0
-
-        class ang_vel_xy_l2:
-            weight = -0.05
-
-        class dof_torques_l2:
-            weight = -1.0e-4
-
-        class dof_vel_l2:
-            weight = -2.5e-4
-
-        class dof_acc_l2:
-            weight = -2.5e-7
-
-        class action_rate_l2:
-            weight = -0.01
-
-        class action_smoothness_l2:
-            weight = -0.01
-
-        class joint_power:
-            weight = -2.0e-5
-
-        class joint_power_distribution:
-            weight = -1.0e-5
-
-        class feet_air_time:
-            weight = 1.0
-            threshold = 0.35
-
-        class undesired_contacts:
-            weight = -0.1
-
-        class stand_joint_deviation_l1:
-            weight = -0.5
-
-        class feet_slide:
-            weight = -0.1
-
-        # class dof_pos_limits:
-        #     weight = 0.0
-
-        # class dof_vel_limits:
-        #     weight = 0.0
-        #     soft_ratio = 0.9
-
-        # class applied_torque_limits:
-        #     weight = 0.0
-
-        class amp_reward:
-            weight = 0.5
+        class action_smoothness:
+            weight = 5e-4
+            action_diff_weight = 1.0
+            action_diff2_weight = 1.0
+            joint_vel_weight = 0.0
 
 
 @configclass
-class AmpVaeVitPPORunnerCfg(RslRlOnPolicyRunnerCfg):
+class FPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     seed = 42
     device = "cuda:0"
     num_steps_per_env = 24
     max_iterations = 100000
     save_interval = 500
-    experiment_name = "e1_v1d6_e1r_amp_vae_vit"
+    experiment_name = "grq20_v2d3_fppo"
+    wandb_project = "isaaclab-fppo"
+    clip_actions = 1.0
 
     policy = RslRlPpoActorCriticCfg(
-        init_noise_std=1.0,
+        init_noise_std=0.4,
         noise_std_type="scalar",
-        min_std=0.0,
+        min_std=0.05,
+        max_std=1.0,
+        action_mean_clip=1.0,
         actor_hidden_dims=[512, 256, 128],
         critic_hidden_dims=[512, 256, 128],
         activation="elu",
@@ -389,13 +425,14 @@ class AmpVaeVitPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         value_loss_coef=0.5,
         use_clipped_value_loss=True,
         clip_param=0.2,
-        entropy_coef=0.01,
+        entropy_coef=0.001,
         num_learning_epochs=5,
         num_mini_batches=4,
         learning_rate=2.0e-5,
         schedule="adaptive",
         gamma=0.99,
         lam=0.95,
+        cost_limit=ConfigSummary.cost.total_limit,
         desired_kl=0.01,
         max_grad_norm=1.0,
     )

@@ -49,17 +49,7 @@ import sys
 import time
 from pathlib import Path
 
-import gymnasium as gym
-import isaaclab_tasks  # noqa: F401
-import rl_sim_env.tasks  # noqa: F401
-import torch
-from isaaclab.envs import DirectMARLEnv, multi_agent_to_single_agent
-from isaaclab.utils.assets import retrieve_file_path
-from isaaclab.utils.dict import print_dict
-from isaaclab.utils.pretrained_checkpoint import get_published_pretrained_checkpoint
-from isaaclab_tasks.utils import get_checkpoint_path, parse_env_cfg
-
-# ensure local source tree is visible for imports
+# ensure local source tree is visible for imports before task registration
 _HERE = Path(__file__).resolve()
 _PROJECT_ROOT = _HERE.parents[2]
 _WORKSPACE_ROOT = _PROJECT_ROOT.parent
@@ -69,6 +59,16 @@ for _p in (_SOURCE_ROOT, _SOURCE_ROOT / "rl_sim_env"):
     if _p.exists() and _p_str not in sys.path:
         sys.path.insert(0, _p_str)
 os.environ.setdefault("RL_SIM_ENV_ROOT_DIR", str(_WORKSPACE_ROOT))
+
+import gymnasium as gym
+import isaaclab_tasks  # noqa: F401
+import rl_sim_env.tasks  # noqa: F401
+import torch
+from isaaclab.envs import DirectMARLEnv, multi_agent_to_single_agent
+from isaaclab.utils.assets import retrieve_file_path
+from isaaclab.utils.dict import print_dict
+from isaaclab.utils.pretrained_checkpoint import get_published_pretrained_checkpoint
+from isaaclab_tasks.utils import get_checkpoint_path, parse_env_cfg
 
 try:
     from rl_algorithms.rsl_rl_wrapper import RslRlOnPolicyRunnerCfg, RslRlVecEnvWrapper

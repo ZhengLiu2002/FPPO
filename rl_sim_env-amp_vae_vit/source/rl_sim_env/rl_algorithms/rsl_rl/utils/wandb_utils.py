@@ -30,13 +30,26 @@ class WandbSummaryWriter(SummaryWriter):
         except KeyError:
             raise KeyError("Please specify wandb_project in the runner config, e.g. legged_gym.")
 
-        try:
-            entity = os.environ["WANDB_USERNAME"]
-        except KeyError:
-            entity = None
+        entity = os.getenv("WANDB_ENTITY") or os.getenv("WANDB_USERNAME")
+
+        init_timeout = None
+        init_timeout_env = os.getenv("WANDB_INIT_TIMEOUT")
+        if init_timeout_env:
+            try:
+                init_timeout = int(init_timeout_env)
+            except ValueError:
+                init_timeout = None
 
         # Initialize wandb
-        wandb.init(project=project, entity=entity, name=run_name)
+        if init_timeout is not None:
+            wandb.init(
+                project=project,
+                entity=entity,
+                name=run_name,
+                settings=wandb.Settings(init_timeout=init_timeout),
+            )
+        else:
+            wandb.init(project=project, entity=entity, name=run_name)
 
         # Add log directory to wandb
         wandb.config.update({"log_dir": log_dir})
