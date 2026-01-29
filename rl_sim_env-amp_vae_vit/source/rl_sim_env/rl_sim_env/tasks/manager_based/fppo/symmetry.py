@@ -51,19 +51,23 @@ def _mirror_policy_obs(
 ) -> torch.Tensor:
     obs = obs.clone()
     obs_dim = obs.shape[1]
-    joint_dim = (obs_dim - 9 - action_dim) // 2
-    if joint_dim <= 0 or (9 + action_dim + 2 * joint_dim) != obs_dim:
+    base_dim = 9
+    cmd_dim = 3
+    joint_dim = (obs_dim - base_dim - cmd_dim - action_dim) // 2
+    if joint_dim <= 0 or (base_dim + cmd_dim + action_dim + 2 * joint_dim) != obs_dim:
         if not getattr(env, "_warn_symmetry_layout", False):
             print("[WARN] Symmetry obs layout mismatch; skipping symmetry transform.")
             setattr(env, "_warn_symmetry_layout", True)
         return obs
 
+    # base_lin_vel
+    obs[:, 0:3] = obs[:, 0:3] * torch.tensor([1.0, -1.0, 1.0], device=obs.device, dtype=obs.dtype)
     # base_ang_vel
-    obs[:, 0:3] = obs[:, 0:3] * torch.tensor([-1.0, 1.0, -1.0], device=obs.device, dtype=obs.dtype)
+    obs[:, 3:6] = obs[:, 3:6] * torch.tensor([-1.0, 1.0, -1.0], device=obs.device, dtype=obs.dtype)
     # projected_gravity
-    obs[:, 3:6] = obs[:, 3:6] * torch.tensor([1.0, -1.0, 1.0], device=obs.device, dtype=obs.dtype)
+    obs[:, 6:9] = obs[:, 6:9] * torch.tensor([1.0, -1.0, 1.0], device=obs.device, dtype=obs.dtype)
 
-    pos_start = 6
+    pos_start = 9
     vel_start = pos_start + joint_dim
     act_start = vel_start + joint_dim
     cmd_start = act_start + action_dim

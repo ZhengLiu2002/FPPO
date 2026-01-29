@@ -21,6 +21,41 @@ conda activate isaaclab
 fuser -k -9 /dev/nvidia0 /dev/nvidia1 /dev/nvidia2 /dev/nvidia3
 ```
 
+### 教师-学生蒸馏（盲走学生）
+- 准备：让环境输出教师观测；简单做法是在 `FPPOEnv` 的观测收集处把 `extras["observations"]["teacher"] = extras["observations"]["critic"]`（或在配置里新增 `teacher` 观测组等于 `critic_obs`）。教师 actor 可临时打开高度扫描等特权项；学生保持默认盲走输入。
+- 阶段 A：训练教师（全感知 FPPO）
+```bash
+python rl_sim_env-amp_vae_vit/scripts/rsl_rl/train.py \
+  --task Isaac-FPPO-Grq20-V2d3-v0 \
+  --run_name teacher_full \
+  --headless \
+  --num_envs 4096 \
+  --log_project_name isaaclab-fppo
+```
+- 阶段 B：蒸馏到盲学生（Distillation + StudentTeacher）
+```bash
+python rl_sim_env-amp_vae_vit/scripts/rsl_rl/train.py \
+  --task Isaac-FPPO-Grq20-V2d3-v0 \
+  --run_name student_distill \
+  --headless \
+  --num_envs 4096 \
+  algorithm.name=distillation \
+  policy.class_name=StudentTeacher \
+  load_run=teacher_full \
+  load_checkpoint=model_.*.pt \
+  --log_project_name isaaclab-fppo
+```
+  说明：Distillation 会把 `load_run` 中的教师权重加载到 teacher 分支，student 分支学习盲走观测→教师动作的映射。若需自定义学生/教师网络宽度，追加 `policy.student_hidden_dims=[512,256,128] policy.teacher_hidden_dims=[512,256,128]`。
+- 阶段 C（可选）：用蒸馏学生推理
+```bash
+python rl_sim_env-amp_vae_vit/scripts/rsl_rl/play.py \
+  --task Isaac-FPPO-Grq20-V2d3-Play-v0 \
+  --num_envs 25 \
+  algorithm.name=distillation \
+  policy.class_name=StudentTeacher \
+  --checkpoint logs/rsl_rl/student_distill/
+```
+
 ### Task ID
 - `Isaac-FPPO-Grq20-V2d3-v0`
 

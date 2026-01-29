@@ -10,6 +10,7 @@ from .actor_critic_recurrent import ActorCriticRecurrent
 from .normalizer import EmpiricalNormalization
 from .student_teacher import StudentTeacher
 from .student_teacher_recurrent import StudentTeacherRecurrent
+from .vae import VAE
 
 __all__ = [
     "ActorCritic",
@@ -17,4 +18,5 @@ __all__ = [
     "EmpiricalNormalization",
     "StudentTeacher",
     "StudentTeacherRecurrent",
+    "VAE",
 ]

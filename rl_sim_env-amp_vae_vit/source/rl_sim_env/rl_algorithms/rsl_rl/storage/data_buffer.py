@@ -20,11 +20,35 @@ class DataBuffer:
         )
 
     def reset(self, data_ids, new_data=None):
-        for data_id in data_ids:
-            if new_data is None:
+        if new_data is None:
+            for data_id in data_ids:
                 self.data_buf[data_id] = torch.zeros(self.num_data_total, device=self.device, dtype=torch.float)
+            return
+
+        if not torch.is_tensor(new_data):
+            new_data = torch.as_tensor(new_data, device=self.device, dtype=torch.float)
+
+        if new_data.ndim == 1:
+            new_data = new_data.unsqueeze(0)
+
+        if new_data.shape[0] == 1 and len(data_ids) > 1:
+            new_data = new_data.repeat(len(data_ids), 1)
+
+        if new_data.shape[1] != self.num_data:
+            if new_data.shape[1] > self.num_data:
+                new_data = new_data[:, : self.num_data]
             else:
-                self.data_buf[data_id] = new_data.repeat(1, self.data_history_length)
+                pad = self.num_data - new_data.shape[1]
+                new_data = torch.cat(
+                    (new_data, torch.zeros((new_data.shape[0], pad), device=self.device, dtype=new_data.dtype)),
+                    dim=1,
+                )
+
+        if new_data.shape[0] != len(data_ids):
+            raise ValueError("new_data batch size must match data_ids length")
+
+        for idx, data_id in enumerate(data_ids):
+            self.data_buf[data_id] = new_data[idx : idx + 1].repeat(1, self.data_history_length)
 
     def insert(self, new_data):
         # Shift observations back.

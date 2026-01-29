@@ -63,11 +63,12 @@ def lin_vel_x_command_threshold(env: ManagerBasedRLEnv, env_ids: Sequence[int]) 
     max_lin_x_level = command.cfg.max_lin_x_level
     if (env.common_step_counter > ((lin_x_level + 1) * max_episode_length * 8)) and (lin_x_level < max_lin_x_level):
         if lin_x_level < max_lin_x_level:
-            lin_x_level += 1.0
+            lin_x_level = min(lin_x_level + 1.0, max_lin_x_level)
             command.cfg.lin_x_level = lin_x_level
+        denom = max(float(max_lin_x_level), 1.0e-6)
         for key, range_cfg in command.cfg.ranges.items():
-            step0 = (range_cfg.max_curriculum_lin_x[0] - range_cfg.start_curriculum_lin_x[0]) / max_lin_x_level
-            step1 = (range_cfg.max_curriculum_lin_x[1] - range_cfg.start_curriculum_lin_x[1]) / max_lin_x_level
+            step0 = (range_cfg.max_curriculum_lin_x[0] - range_cfg.start_curriculum_lin_x[0]) / denom
+            step1 = (range_cfg.max_curriculum_lin_x[1] - range_cfg.start_curriculum_lin_x[1]) / denom
             new_min = range_cfg.start_curriculum_lin_x[0] + step0 * lin_x_level
             new_max = range_cfg.start_curriculum_lin_x[1] + step1 * lin_x_level
             range_cfg.lin_vel_x = (new_min, new_max)
@@ -83,11 +84,12 @@ def ang_vel_z_command_threshold(env: ManagerBasedRLEnv, env_ids: Sequence[int]) 
     max_ang_z_level = command.cfg.max_ang_z_level
     if (env.common_step_counter > ((ang_z_level + 1) * max_episode_length * 8)) and (ang_z_level < max_ang_z_level):
         if ang_z_level < max_ang_z_level:
-            ang_z_level += 1.0
+            ang_z_level = min(ang_z_level + 1.0, max_ang_z_level)
             command.cfg.ang_z_level = ang_z_level
+        denom = max(float(max_ang_z_level), 1.0e-6)
         for key, range_cfg in command.cfg.ranges.items():
-            step0 = (range_cfg.max_curriculum_ang_z[0] - range_cfg.start_curriculum_ang_z[0]) / max_ang_z_level
-            step1 = (range_cfg.max_curriculum_ang_z[1] - range_cfg.start_curriculum_ang_z[1]) / max_ang_z_level
+            step0 = (range_cfg.max_curriculum_ang_z[0] - range_cfg.start_curriculum_ang_z[0]) / denom
+            step1 = (range_cfg.max_curriculum_ang_z[1] - range_cfg.start_curriculum_ang_z[1]) / denom
             new_min = range_cfg.start_curriculum_ang_z[0] + step0 * ang_z_level
             new_max = range_cfg.start_curriculum_ang_z[1] + step1 * ang_z_level
             range_cfg.ang_vel_z = (new_min, new_max)

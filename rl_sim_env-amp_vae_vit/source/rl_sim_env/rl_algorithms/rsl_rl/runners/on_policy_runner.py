@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import inspect
+import math
 import os
 import statistics
 import time
@@ -32,7 +33,8 @@ from ..modules import (
     StudentTeacher,
     StudentTeacherRecurrent,
 )
-from ..utils import store_code_state
+from ..utils import ConstraintNormalizer, store_code_state
+from ..storage.data_buffer import DataBuffer
 
 class OnPolicyRunner:
     """On-policy runner for training and evaluation."""
@@ -59,6 +61,29 @@ class OnPolicyRunner:
         # resolve dimensions of observations
         obs, extras = self.env.get_observations()
         num_obs = obs.shape[1]
+        self._actor_obs_dim = num_obs
+        self._vae_enabled = False
+        self._vae_num_obs = None
+        self._vae_history_length = None
+        self._vae_out_dim = None
+        self._vae_obs_buffer = None
+        self._critic_obs_slices = {}
+        self._amp_obs_slices = {}
+        self._amp_obs_dim = None
+
+        if hasattr(self.env.unwrapped, "observation_manager"):
+            group_obs_dim = self.env.unwrapped.observation_manager.group_obs_dim
+            critic_group = "critic" if "critic" in group_obs_dim else ("critic_obs" if "critic_obs" in group_obs_dim else None)
+            if critic_group is not None:
+                self._critic_obs_slices = self._build_obs_term_slices(critic_group)
+            amp_group = None
+            if "amp_obs" in group_obs_dim:
+                amp_group = "amp_obs"
+            elif "amp" in group_obs_dim:
+                amp_group = "amp"
+            if amp_group is not None:
+                self._amp_obs_slices = self._build_obs_term_slices(amp_group)
+                self._amp_obs_dim = group_obs_dim[amp_group][0]
 
         # resolve type of privileged observations
         if self.training_type == "rl":
@@ -82,11 +107,42 @@ class OnPolicyRunner:
 
         # evaluate the policy class
         policy_cfg = dict(self.policy_cfg)
+        vae_cfg = policy_cfg.get("vae", None)
+        if vae_cfg is not None:
+            if hasattr(vae_cfg, "to_dict"):
+                vae_cfg = vae_cfg.to_dict()
+            elif not isinstance(vae_cfg, dict):
+                vae_cfg = vars(vae_cfg)
+            if vae_cfg.get("enabled", False):
+                self._vae_enabled = True
+                self._vae_num_obs = int(vae_cfg.get("num_vae_obs", self._actor_obs_dim))
+                if self._vae_num_obs != self._actor_obs_dim:
+                    self._vae_num_obs = self._actor_obs_dim
+                self._vae_history_length = int(vae_cfg.get("obs_history_length", 1))
+                self._vae_out_dim = vae_cfg.get("cenet_out_dim", vae_cfg.get("num_vae_out"))
+                if self._vae_out_dim is None:
+                    raise ValueError("VAE enabled but 'cenet_out_dim'/'num_vae_out' is not set.")
+                self._vae_out_dim = int(self._vae_out_dim)
+                if vae_cfg.get("cenet_in_dim") is None:
+                    vae_cfg["cenet_in_dim"] = self._vae_num_obs * self._vae_history_length
+                if vae_cfg.get("cenet_out_dim") is None:
+                    vae_cfg["cenet_out_dim"] = self._vae_out_dim
+                if vae_cfg.get("cenet_recon_dim") is None:
+                    vae_cfg["cenet_recon_dim"] = self._actor_obs_dim
+                policy_cfg["vae"] = vae_cfg
+                num_obs = num_obs + self._vae_out_dim
         policy_class_name = policy_cfg.pop("class_name")
         policy_class = eval(policy_class_name)
         policy: ActorCritic | ActorCriticRecurrent | StudentTeacher | StudentTeacherRecurrent = policy_class(
             num_obs, num_privileged_obs, self.env.num_actions, **policy_cfg
         ).to(self.device)
+        if self._vae_enabled:
+            self._vae_obs_buffer = DataBuffer(
+                num_envs=self.env.num_envs,
+                num_data=self._vae_num_obs,
+                data_history_length=self._vae_history_length,
+                device=self.device,
+            )
 
         # initialize algorithm
         alg_cfg = dict(self.alg_cfg)
@@ -104,11 +160,23 @@ class OnPolicyRunner:
             raise ValueError("Algorithm name not found. Please set 'algorithm.name' or 'algorithm.class_name'.")
         alg_cfg = self._filter_kwargs(alg_class, alg_cfg)
         self.alg = alg_class(policy, device=self.device, **alg_cfg, multi_gpu_cfg=self.multi_gpu_cfg)
+        if hasattr(self.alg, "set_vae_obs_slices"):
+            self.alg.set_vae_obs_slices(self._critic_obs_slices, self._amp_obs_slices)
 
         # store training configuration
         self.num_steps_per_env = self.cfg["num_steps_per_env"]
         self.save_interval = self.cfg["save_interval"]
+        self.early_save_interval = self.cfg.get("early_save_interval")
+        self.early_save_iterations = self.cfg.get("early_save_iterations")
         self.empirical_normalization = self.cfg["empirical_normalization"]
+        self._constraint_normalizer = ConstraintNormalizer.from_cfg(self.alg_cfg, device=self.device)
+        if not self._constraint_normalizer.enabled:
+            self._constraint_normalizer = None
+        self._constraint_scale = self.alg_cfg.get("constraint_cost_scale")
+        self._constraint_scale_by_gamma = self.alg_cfg.get("constraint_scale_by_gamma", False)
+        self._constraint_gamma = self.alg_cfg.get("cost_gamma")
+        if self._constraint_gamma is None:
+            self._constraint_gamma = self.alg_cfg.get("gamma")
         if self.empirical_normalization:
             self.obs_normalizer = EmpiricalNormalization(shape=[num_obs], until=1.0e8).to(self.device)
             self.privileged_obs_normalizer = EmpiricalNormalization(shape=[num_privileged_obs], until=1.0e8).to(
@@ -126,6 +194,10 @@ class OnPolicyRunner:
             [num_obs],
             [num_privileged_obs],
             [self.env.num_actions],
+            vae_actor_obs_shape=[self._actor_obs_dim] if self._vae_enabled else None,
+            vae_obs_history_shape=[self._vae_num_obs * self._vae_history_length] if self._vae_enabled else None,
+            next_actor_obs_shape=[self._actor_obs_dim] if self._vae_enabled else None,
+            amp_obs_shape=[self._amp_obs_dim] if self._amp_obs_dim is not None else None,
         )
 
         # Decide whether to disable logging
@@ -177,8 +249,29 @@ class OnPolicyRunner:
 
         # start learning
         obs, extras = self.env.get_observations()
+        actor_obs = obs.to(self.device)
         privileged_obs = extras["observations"].get(self.privileged_obs_type, obs)
-        obs, privileged_obs = obs.to(self.device), privileged_obs.to(self.device)
+        privileged_obs = privileged_obs.to(self.device)
+        amp_obs_current = None
+        if isinstance(extras, dict):
+            obs_payload = extras.get("observations", {})
+            if isinstance(obs_payload, dict):
+                amp_obs_current = obs_payload.get("amp_obs")
+                if amp_obs_current is None:
+                    amp_obs_current = obs_payload.get("amp")
+                if amp_obs_current is not None:
+                    amp_obs_current = amp_obs_current.to(self.device)
+        if self._vae_enabled and self._vae_obs_buffer is not None:
+            # initialize VAE history with first observation
+            all_ids = torch.arange(self.env.num_envs, device=self.device)
+            self._vae_obs_buffer.reset(all_ids, new_data=actor_obs[:, : self._vae_num_obs])
+            obs_history = self._vae_obs_buffer.get_all_data()
+            policy_obs = self.alg.policy.get_policy_obs(actor_obs, obs_history, deterministic=True)
+        else:
+            obs_history = None
+            policy_obs = actor_obs
+        # perform normalization
+        policy_obs = self.obs_normalizer(policy_obs)
         self.train_mode()  # switch to train mode (for dropout for example)
 
         # Book keeping
@@ -204,38 +297,67 @@ class OnPolicyRunner:
             with torch.inference_mode():
                 for _ in range(self.num_steps_per_env):
                     # Sample actions
-                    actions = self.alg.act(obs, privileged_obs)
+                    actions = self.alg.act(policy_obs, privileged_obs, actor_obs=actor_obs, vae_obs_history=obs_history)
                     # Optional symmetry cost from policy (strict mirror constraint)
                     sym_cost = None
                     base_env = getattr(self.env, "unwrapped", None)
                     if base_env is None and hasattr(self.env, "env"):
                         base_env = self.env.env
                     if base_env is not None and hasattr(base_env, "compute_symmetry_cost"):
-                        sym_cost = base_env.compute_symmetry_cost(self.alg.policy, obs)
+                        sym_cost = base_env.compute_symmetry_cost(
+                            self.alg.policy, actor_obs, obs_history=obs_history
+                        )
                     # Step the environment
                     obs, rewards, dones, infos = self.env.step(actions.to(self.env.device))
                     # Move to device
-                    obs, rewards, dones = (obs.to(self.device), rewards.to(self.device), dones.to(self.device))
+                    actor_obs = obs.to(self.device)
+                    rewards, dones = rewards.to(self.device), dones.to(self.device)
                     # perform normalization
-                    obs = self.obs_normalizer(obs)
+                    if self._vae_enabled and self._vae_obs_buffer is not None:
+                        # reset history on episode boundaries
+                        done_ids = (dones > 0).nonzero(as_tuple=False).squeeze(-1)
+                        if done_ids.numel() > 0:
+                            self._vae_obs_buffer.reset(done_ids, new_data=actor_obs[done_ids, : self._vae_num_obs])
+                        self._vae_obs_buffer.insert(actor_obs[:, : self._vae_num_obs])
+                        obs_history = self._vae_obs_buffer.get_all_data()
+                        policy_obs = self.alg.policy.get_policy_obs(actor_obs, obs_history, deterministic=True)
+                    else:
+                        obs_history = None
+                        policy_obs = actor_obs
+                    policy_obs = self.obs_normalizer(policy_obs)
                     if self.privileged_obs_type is not None:
                         privileged_obs = self.privileged_obs_normalizer(
                             infos["observations"][self.privileged_obs_type].to(self.device)
                         )
                     else:
-                        privileged_obs = obs
+                        privileged_obs = policy_obs
 
                     # process the step
+                    if sym_cost is not None and isinstance(infos, dict):
+                        log = infos.setdefault("log", {})
+                        log["Episode_Cost/symmetric"] = sym_cost.to(self.device)
+                        cost_payload = infos.setdefault("cost", {})
+                        if isinstance(cost_payload, dict):
+                            cost_payload["symmetric"] = sym_cost
                     costs = self._extract_costs(infos, rewards)
-                    if sym_cost is not None:
-                        sym_cost = sym_cost.to(self.device)
-                        if sym_cost.ndim == 1 and costs.ndim > 1:
-                            sym_cost = sym_cost.unsqueeze(-1)
-                        costs = costs + sym_cost
-                        if isinstance(infos, dict):
-                            log = infos.setdefault("log", {})
-                            log["Episode_Cost/symmetric"] = sym_cost
-                    self.alg.process_env_step(rewards, dones, infos, costs)
+                    amp_obs_next = None
+                    if isinstance(infos, dict):
+                        obs_payload = infos.get("observations", {})
+                        if isinstance(obs_payload, dict):
+                            amp_obs_next = obs_payload.get("amp_obs")
+                            if amp_obs_next is None:
+                                amp_obs_next = obs_payload.get("amp")
+                            if amp_obs_next is not None:
+                                amp_obs_next = amp_obs_next.to(self.device)
+                    self.alg.process_env_step(
+                        rewards,
+                        dones,
+                        infos,
+                        costs,
+                        next_actor_obs=actor_obs,
+                        next_amp_obs=amp_obs_current,
+                    )
+                    amp_obs_current = amp_obs_next
 
                     # book keeping
                     if self.log_dir is not None:
@@ -274,7 +396,7 @@ class OnPolicyRunner:
                 # Log information
                 self.log(locals())
                 # Save model
-                if it % self.save_interval == 0:
+                if self._should_save_checkpoint(it):
                     self.save(os.path.join(self.log_dir, f"model_{it}.pt"))
 
             # Clear episode infos
@@ -291,6 +413,16 @@ class OnPolicyRunner:
         # Save the final model after training
         if self.log_dir is not None and not self.disable_logs:
             self.save(os.path.join(self.log_dir, f"model_{self.current_learning_iteration}.pt"))
+
+    def _should_save_checkpoint(self, iteration: int) -> bool:
+        if iteration <= 0:
+            return False
+        if self.early_save_interval and self.early_save_iterations:
+            if iteration <= self.early_save_iterations and iteration % self.early_save_interval == 0:
+                return True
+        if self.save_interval and iteration % self.save_interval == 0:
+            return True
+        return False
 
     def log(self, locs: dict, width: int = 80, pad: int = 35):
         # Compute the collection size
@@ -333,6 +465,7 @@ class OnPolicyRunner:
 
         # -- Training metrics
         train_metrics = getattr(self.alg, "train_metrics", None)
+        extra_metrics_string = ""
         if train_metrics:
             for key, value in train_metrics.items():
                 if value is None:
@@ -347,6 +480,27 @@ class OnPolicyRunner:
                     self.writer.add_scalar("Policy/kl", value, locs["it"])
                 else:
                     self.writer.add_scalar(f"Train/{key}", value, locs["it"])
+            # terminal extras for quick diagnosis
+            mean_cost_return = train_metrics.get("mean_cost_return")
+            if mean_cost_return is not None:
+                extra_metrics_string += f"""{'Mean cost return:':>{pad}} {mean_cost_return:.4f}\n"""
+            if hasattr(self.alg, "cost_limit"):
+                extra_metrics_string += f"""{'Cost limit:':>{pad}} {self.alg.cost_limit:.4f}\n"""
+            cost_limit_margin = train_metrics.get("cost_limit_margin")
+            if cost_limit_margin is not None:
+                extra_metrics_string += f"""{'Cost limit margin:':>{pad}} {cost_limit_margin:.4f}\n"""
+            cost_violation_rate = train_metrics.get("cost_violation_rate")
+            if cost_violation_rate is not None:
+                extra_metrics_string += f"""{'Cost violation rate:':>{pad}} {cost_violation_rate:.4f}\n"""
+            kl_value = train_metrics.get("kl")
+            if kl_value is not None:
+                extra_metrics_string += f"""{'Mean KL:':>{pad}} {kl_value:.6f}\n"""
+            step_size = train_metrics.get("step_size")
+            if step_size is not None:
+                extra_metrics_string += f"""{'Step size:':>{pad}} {step_size:.6f}\n"""
+        cost_scale = self._get_constraint_scale()
+        if cost_scale is not None:
+            extra_metrics_string += f"""{'Cost scale (1-gamma):':>{pad}} {cost_scale:.6f}\n"""
 
         # -- Policy
         self.writer.add_scalar("Policy/mean_noise_std", mean_std.item(), locs["it"])
@@ -382,6 +536,7 @@ class OnPolicyRunner:
             log_string += f"""{'Mean reward:':>{pad}} {statistics.mean(locs['rewbuffer']):.2f}\n"""
             # -- episode info
             log_string += f"""{'Mean episode length:':>{pad}} {statistics.mean(locs['lenbuffer']):.2f}\n"""
+            log_string += extra_metrics_string
         else:
             log_string = (
                 f"""{'#' * width}\n"""
@@ -392,6 +547,7 @@ class OnPolicyRunner:
             )
             for key, value in locs["loss_dict"].items():
                 log_string += f"""{f'{key}:':>{pad}} {value:.4f}\n"""
+            log_string += extra_metrics_string
 
         log_string += ep_string
         log_string += (
@@ -412,9 +568,13 @@ class OnPolicyRunner:
                 optimizer_state = {key: opt.state_dict() for key, opt in self.alg.optimizer.items()}
             else:
                 optimizer_state = self.alg.optimizer.state_dict()
+        vae_optimizer_state = None
+        if hasattr(self.alg, "vae_optimizer") and self.alg.vae_optimizer is not None:
+            vae_optimizer_state = self.alg.vae_optimizer.state_dict()
         saved_dict = {
             "model_state_dict": self.alg.policy.state_dict(),
             "optimizer_state_dict": optimizer_state,
+            "vae_optimizer_state_dict": vae_optimizer_state,
             "iter": self.current_learning_iteration,
             "infos": infos,
         }
@@ -457,6 +617,14 @@ class OnPolicyRunner:
                             opt.load_state_dict(optimizer_state[key])
                 else:
                     self.alg.optimizer.load_state_dict(optimizer_state)
+            # -- VAE optimizer
+            vae_optimizer_state = loaded_dict.get("vae_optimizer_state_dict")
+            if (
+                vae_optimizer_state is not None
+                and hasattr(self.alg, "vae_optimizer")
+                and self.alg.vae_optimizer is not None
+            ):
+                self.alg.vae_optimizer.load_state_dict(vae_optimizer_state)
         # -- load current learning iteration
         if resumed_training:
             self.current_learning_iteration = loaded_dict["iter"]
@@ -470,8 +638,31 @@ class OnPolicyRunner:
         if self.cfg["empirical_normalization"]:
             if device is not None:
                 self.obs_normalizer.to(device)
-            policy = lambda x: self.alg.policy.act_inference(self.obs_normalizer(x))  # noqa: E731
-        return policy
+        if not self._vae_enabled:
+            if self.cfg["empirical_normalization"]:
+                policy = lambda x: self.alg.policy.act_inference(self.obs_normalizer(x))  # noqa: E731
+            return policy
+
+        # VAE-enabled inference: build history and concatenate code
+        def _vae_policy(obs: torch.Tensor):
+            actor_obs = obs.to(self.device)
+            if self._vae_obs_buffer is None:
+                self._vae_obs_buffer = DataBuffer(
+                    num_envs=self.env.num_envs,
+                    num_data=self._vae_num_obs,
+                    data_history_length=self._vae_history_length,
+                    device=self.device,
+                )
+                all_ids = torch.arange(self.env.num_envs, device=self.device)
+                self._vae_obs_buffer.reset(all_ids, new_data=actor_obs[:, : self._vae_num_obs])
+            self._vae_obs_buffer.insert(actor_obs[:, : self._vae_num_obs])
+            obs_history = self._vae_obs_buffer.get_all_data()
+            policy_obs = self.alg.policy.get_policy_obs(actor_obs, obs_history, deterministic=True)
+            if self.cfg["empirical_normalization"]:
+                policy_obs = self.obs_normalizer(policy_obs)
+            return self.alg.policy.act_inference(policy_obs)
+
+        return _vae_policy
 
     def train_mode(self):
         # -- PPO
@@ -509,18 +700,46 @@ class OnPolicyRunner:
         if isinstance(cost, dict):
             if not cost:
                 return torch.zeros_like(rewards)
-            cost_values = list(cost.values())
-            cost = cost_values[0]
-            for value in cost_values[1:]:
-                cost = cost + value
+            if self._constraint_normalizer is not None:
+                cost, _ = self._constraint_normalizer.aggregate(cost)
+            else:
+                cost_values = []
+                for value in cost.values():
+                    if not torch.is_tensor(value):
+                        value = torch.as_tensor(value, device=self.device)
+                    value = value.to(self.device)
+                    if value.ndim > 1 and value.shape[-1] > 1:
+                        value = value.sum(dim=-1)
+                    cost_values.append(torch.clamp(value, min=0.0))
+                cost = cost_values[0]
+                for value in cost_values[1:]:
+                    cost = cost + value
+        else:
+            if self._constraint_normalizer is not None:
+                cost, _ = self._constraint_normalizer.aggregate({"total": cost})
         if not torch.is_tensor(cost):
             cost = torch.as_tensor(cost, device=self.device)
-        cost = cost.to(self.device)
+        cost = torch.clamp(cost.to(self.device), min=0.0)
+        cost_scale = self._get_constraint_scale()
+        if cost_scale is not None and cost_scale != 1.0:
+            cost = cost * cost_scale
         if cost.ndim > 1 and cost.shape[-1] > 1:
             cost = cost.sum(dim=-1)
         if cost.ndim == 1 and rewards.ndim > 1:
             cost = cost.unsqueeze(-1)
         return cost
+
+    def _get_constraint_scale(self) -> float | None:
+        if self._constraint_scale is not None:
+            return float(self._constraint_scale)
+        if not self._constraint_scale_by_gamma:
+            return None
+        cost_gamma = self._constraint_gamma
+        if cost_gamma is None:
+            return None
+        if not (0.0 < cost_gamma < 1.0):
+            return None
+        return 1.0 - float(cost_gamma)
 
     def _configure_multi_gpu(self):
         """Configure multi-gpu training."""
@@ -565,3 +784,17 @@ class OnPolicyRunner:
         torch.distributed.init_process_group(backend="nccl", rank=self.gpu_global_rank, world_size=self.gpu_world_size)
         # set device to the local rank
         torch.cuda.set_device(self.gpu_local_rank)
+
+    def _build_obs_term_slices(self, group_name: str) -> dict[str, slice]:
+        obs_manager = getattr(self.env.unwrapped, "observation_manager", None)
+        if obs_manager is None:
+            return {}
+        terms = obs_manager.active_terms.get(group_name, [])
+        dims = obs_manager.group_obs_term_dim.get(group_name, [])
+        slices: dict[str, slice] = {}
+        idx = 0
+        for name, shape in zip(terms, dims):
+            length = math.prod(shape)
+            slices[str(name)] = slice(idx, idx + length)
+            idx += length
+        return slices

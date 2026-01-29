@@ -18,6 +18,7 @@ import warp as wp
 from isaaclab.assets import RigidObject
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.sensors import FrameTransformer, RayCaster
+import isaaclab.utils.math as math_utils
 from isaaclab.utils.math import quat_apply_yaw, quat_rotate_inverse, yaw_quat
 from rl_sim_env.tasks.manager_based.common.mdp.utils.warp import rasterize_voxels
 
@@ -87,6 +88,47 @@ def generated_commands_scale(env: ManagerBasedRLEnv, command_name: str, scale: t
     command = env.command_manager.get_command(command_name)
     scale_tensor = torch.tensor(scale, dtype=command.dtype, device=command.device)
     return command * scale_tensor
+
+
+def heading_error(env: ManagerBasedRLEnv, command_name: str = "base_velocity") -> torch.Tensor:
+    """Heading error between target heading and current base heading."""
+    command_term = env.command_manager.get_term(command_name)
+    heading_target = getattr(command_term, "heading_target", None)
+    robot = getattr(command_term, "robot", None)
+    if heading_target is None or robot is None:
+        return torch.zeros((env.num_envs, 1), device=env.device)
+    error = math_utils.wrap_to_pi(heading_target - robot.data.heading_w)
+    return error.unsqueeze(-1)
+
+
+def action_history(
+    env: ManagerBasedEnv, history_length: int = 2, action_name: str | None = None
+) -> torch.Tensor:
+    """Concatenate the most recent actions into a single vector."""
+    if action_name is None:
+        action = env.action_manager.action
+    else:
+        action = env.action_manager.get_term(action_name).raw_actions
+    if action is None:
+        return torch.zeros((env.num_envs, 0), device=env.device)
+
+    hist = getattr(env, "_action_hist_buffer", None)
+    if hist is None or hist.shape[1] != history_length or hist.shape[2] != action.shape[1]:
+        hist = torch.zeros(
+            (env.num_envs, history_length, action.shape[1]), device=action.device, dtype=action.dtype
+        )
+        env._action_hist_buffer = hist
+
+    reset_buf = getattr(env, "reset_buf", None)
+    if reset_buf is not None:
+        reset_ids = reset_buf.nonzero(as_tuple=False).flatten()
+        if reset_ids.numel() > 0:
+            hist[reset_ids] = 0.0
+
+    if history_length > 1:
+        hist[:, 1:] = hist[:, :-1].clone()
+    hist[:, 0] = action
+    return hist.reshape(env.num_envs, -1)
 
 
 def voxel_occupancy(env: ManagerBasedEnv) -> torch.Tensor:

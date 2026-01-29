@@ -7,8 +7,10 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from rsl_rl.utils import resolve_nn_activation
 from torch.distributions import Normal
+from .vae import VAE
 
 
 class ActorCritic(nn.Module):
@@ -28,6 +30,7 @@ class ActorCritic(nn.Module):
         activation="elu",
         init_noise_std=1.0,
         noise_std_type: str = "scalar",
+        vae: dict | None = None,
         **kwargs,
     ):
         if kwargs:
@@ -102,6 +105,34 @@ class ActorCritic(nn.Module):
         self.min_std = min_std
         self.max_std = max_std
         self.action_mean_clip = action_mean_clip
+
+        # Optional VAE for auxiliary training (no effect unless enabled)
+        self.vae_enabled = False
+        self.vae = None
+        self.vae_loss_coef = 0.0
+        self.vae_kl_coef = 0.0
+        self.vae_recon_dim = None
+        self.vae_learning_rate = None
+        if vae is not None:
+            if hasattr(vae, "to_dict"):
+                vae_cfg = vae.to_dict()
+            elif isinstance(vae, dict):
+                vae_cfg = dict(vae)
+            else:
+                vae_cfg = vars(vae)
+            enabled = bool(vae_cfg.get("enabled", False))
+            if enabled:
+                cenet_in_dim = vae_cfg.get("cenet_in_dim")
+                cenet_out_dim = vae_cfg.get("cenet_out_dim")
+                cenet_recon_dim = vae_cfg.get("cenet_recon_dim", 45)
+                if cenet_in_dim is None or cenet_out_dim is None:
+                    raise ValueError("VAE enabled but 'cenet_in_dim' or 'cenet_out_dim' is not set.")
+                self.vae = VAE(cenet_in_dim=cenet_in_dim, cenet_out_dim=cenet_out_dim, cenet_recon_dim=cenet_recon_dim)
+                self.vae_enabled = True
+                self.vae_loss_coef = float(vae_cfg.get("loss_coef", 1.0))
+                self.vae_kl_coef = float(vae_cfg.get("kl_coef", 1.0))
+                self.vae_recon_dim = int(cenet_recon_dim)
+                self.vae_learning_rate = vae_cfg.get("learning_rate")
 
     @staticmethod
     # not used at the moment
@@ -190,3 +221,59 @@ class ActorCritic(nn.Module):
 
         super().load_state_dict(state_dict, strict=strict)
         return True
+
+    def compute_vae_loss(self, obs_history: torch.Tensor | None, next_actor_obs: torch.Tensor | None):
+        """Compute VAE reconstruction + KL loss for auxiliary training."""
+        if not self.vae_enabled or self.vae is None:
+            return None, {}
+        if obs_history is None or next_actor_obs is None:
+            return None, {}
+        (
+            _code,
+            _code_vel,
+            _code_mass,
+            _code_com,
+            _code_latent,
+            decoded,
+            mean_vel,
+            logvar_vel,
+            mean_latent,
+            logvar_latent,
+            mean_mass,
+            logvar_mass,
+            mean_com,
+            logvar_com,
+        ) = self.vae.cenet_forward(obs_history, deterministic=False)
+
+        recon_dim = self.vae_recon_dim
+        if recon_dim is None:
+            recon_dim = decoded.shape[-1]
+        recon_dim = min(int(recon_dim), int(decoded.shape[-1]), int(next_actor_obs.shape[-1]))
+        recon_target = next_actor_obs[..., :recon_dim]
+        recon_pred = decoded[..., :recon_dim]
+        recon_loss = F.mse_loss(recon_pred, recon_target, reduction="mean")
+
+        def _kl_loss(mean, logvar):
+            return 0.5 * torch.mean(torch.exp(logvar) + mean.pow(2) - 1.0 - logvar)
+
+        kl_loss = (
+            _kl_loss(mean_vel, logvar_vel)
+            + _kl_loss(mean_latent, logvar_latent)
+            + _kl_loss(mean_mass, logvar_mass)
+            + _kl_loss(mean_com, logvar_com)
+        )
+
+        total_loss = self.vae_loss_coef * recon_loss + self.vae_kl_coef * kl_loss
+        metrics = {
+            "vae_total": total_loss.detach(),
+            "vae_recon": recon_loss.detach(),
+            "vae_kl": kl_loss.detach(),
+        }
+        return total_loss, metrics
+
+    def get_policy_obs(self, actor_obs: torch.Tensor, obs_history: torch.Tensor, deterministic: bool = True):
+        """Build policy input by concatenating VAE code with actor observations."""
+        if not self.vae_enabled or self.vae is None:
+            return actor_obs
+        code, *_ = self.vae.cenet_forward(obs_history, deterministic=deterministic)
+        return torch.cat((code, actor_obs), dim=-1)

@@ -15,6 +15,7 @@ from rl_sim_env.tasks.manager_based.fppo.config.grq20_v2d3.config_summary import
     ROBOT_CFG,
     ROBOT_FOOT_NAMES,
     ROBOT_LEG_JOINT_NAMES,
+    ROBOT_THIGH_BODY_NAMES,
     ConfigSummary,
 )
 from rl_sim_env.tasks.manager_based.common.command.config import (
@@ -107,14 +108,23 @@ class Grq20V2d3FPPOEnvCfg(FPPOEnvCfg):
         if self.observations.critic_obs.random_material is not None:
             self.observations.critic_obs.random_material.scale = self.config_summary.observation.scale.random_material
         # actor obs
+        self.observations.actor_obs.base_lin_vel.scale = self.config_summary.observation.scale.base_lin_vel
         self.observations.actor_obs.base_ang_vel.scale = self.config_summary.observation.scale.base_ang_vel
         self.observations.actor_obs.projected_gravity.scale = self.config_summary.observation.scale.projected_gravity
         self.observations.actor_obs.velocity_commands.params["scale"] = (
             self.config_summary.observation.scale.vel_command
         )
+        if self.observations.actor_obs.height_scan is not None:
+            self.observations.actor_obs.height_scan.scale = self.config_summary.observation.scale.height_measurements
+        if self.observations.actor_obs.random_mass is not None:
+            self.observations.actor_obs.random_mass.scale = self.config_summary.observation.scale.random_mass
+        if self.observations.actor_obs.random_com is not None:
+            self.observations.actor_obs.random_com.scale = self.config_summary.observation.scale.random_com
         # align joint observation ordering with action joints for symmetry
         self.observations.actor_obs.joint_pos.params["asset_cfg"] = leg_joint_cfg
         self.observations.actor_obs.joint_vel.params["asset_cfg"] = leg_joint_cfg
+        if getattr(self.observations.actor_obs, "joint_torques", None) is not None:
+            self.observations.actor_obs.joint_torques.params["asset_cfg"] = leg_joint_cfg
         self.observations.critic_obs.joint_pos.params["asset_cfg"] = leg_joint_cfg
         self.observations.critic_obs.joint_vel.params["asset_cfg"] = leg_joint_cfg
 
@@ -162,18 +172,25 @@ class Grq20V2d3FPPOEnvCfg(FPPOEnvCfg):
         leg_joint_cfg = SceneEntityCfg("robot", joint_names=ROBOT_LEG_JOINT_NAMES, preserve_order=True)
         self.observations.actor_obs.joint_pos.scale = self.config_summary.observation.scale.joint_pos
         self.observations.actor_obs.joint_vel.scale = self.config_summary.observation.scale.joint_vel
-        # Drop auxiliary critic terms (push_vel, random material/mass/com) to match the 250-dim critic_obs used in training
+        if getattr(self.observations.actor_obs, "joint_torques", None) is not None:
+            self.observations.actor_obs.joint_torques.params["asset_cfg"] = leg_joint_cfg
+        # Drop auxiliary critic terms (push_vel, random material/com) to match the 250-dim critic_obs used in training;
+        # keep random_mass so VAE can learn mass inference
         self.observations.critic_obs.push_vel = None
         self.observations.critic_obs.random_material = None
         self.observations.critic_obs.random_com = None
-        self.observations.critic_obs.random_mass = None
         # noise
+        base_lin_vel_noise = self.config_summary.observation.noise.base_lin_vel
         base_ang_vel_noise = self.config_summary.observation.noise.base_ang_vel
         gravity_noise = self.config_summary.observation.noise.projected_gravity
         joint_pos_noise = self.config_summary.observation.noise.joint_pos
         joint_vel_noise = self.config_summary.observation.noise.joint_vel
 
         # actor obs
+        self.observations.actor_obs.base_lin_vel.noise = Unoise(
+            n_min=-base_lin_vel_noise,
+            n_max=base_lin_vel_noise,
+        )
         self.observations.actor_obs.base_ang_vel.noise = Unoise(
             n_min=-base_ang_vel_noise,
             n_max=base_ang_vel_noise,
@@ -187,6 +204,9 @@ class Grq20V2d3FPPOEnvCfg(FPPOEnvCfg):
             n_min=-joint_vel_noise,
             n_max=joint_vel_noise,
         )
+
+        if self.observations.actor_obs.height_scan is not None:
+            self.observations.actor_obs.height_scan.clip = self.config_summary.observation.clip.height_measurements
 
         # clip
         # critic obs
@@ -229,26 +249,55 @@ class Grq20V2d3FPPOEnvCfg(FPPOEnvCfg):
         self.events.push_robot.params["velocity_schedule"] = self.config_summary.event.push_robot_schedule
 
         # rewards
-        self.rewards.command_tracking.weight = self.config_summary.reward.command_tracking.weight
-        self.rewards.command_tracking.params["kappa_lin"] = self.config_summary.reward.command_tracking.kappa_lin
-        self.rewards.command_tracking.params["kappa_ang"] = self.config_summary.reward.command_tracking.kappa_ang
+        self.rewards.track_lin_vel_xy_exp.weight = self.config_summary.reward.track_lin_vel_xy_exp.weight
+        self.rewards.track_lin_vel_xy_exp.params["std"] = self.config_summary.reward.track_lin_vel_xy_exp.std
+        self.rewards.track_lin_vel_xy_exp.params["command_name"] = self.config_summary.reward.track_lin_vel_xy_exp.command_name
 
-        self.rewards.joint_torque_l2.weight = -self.config_summary.reward.joint_torque.weight
-        self.rewards.joint_torque_l2.params["ref_mass"] = self.config_summary.reward.joint_torque.ref_mass
-        self.rewards.joint_torque_l2.params["ref_weight"] = self.config_summary.reward.joint_torque.ref_weight
-        self.rewards.joint_torque_l2.params["asset_cfg"] = leg_joint_cfg
+        self.rewards.track_ang_vel_z_exp.weight = self.config_summary.reward.track_ang_vel_z_exp.weight
+        self.rewards.track_ang_vel_z_exp.params["std"] = self.config_summary.reward.track_ang_vel_z_exp.std
+        self.rewards.track_ang_vel_z_exp.params["command_name"] = self.config_summary.reward.track_ang_vel_z_exp.command_name
 
-        self.rewards.action_smoothness.weight = -self.config_summary.reward.action_smoothness.weight
-        self.rewards.action_smoothness.params["action_diff_weight"] = (
-            self.config_summary.reward.action_smoothness.action_diff_weight
-        )
-        self.rewards.action_smoothness.params["action_diff2_weight"] = (
-            self.config_summary.reward.action_smoothness.action_diff2_weight
-        )
-        self.rewards.action_smoothness.params["joint_vel_weight"] = (
-            self.config_summary.reward.action_smoothness.joint_vel_weight
-        )
-        self.rewards.action_smoothness.params["asset_cfg"] = leg_joint_cfg
+        self.rewards.flat_orientation_l2.weight = self.config_summary.reward.flat_orientation_l2.weight
+        self.rewards.base_height_l2_fix.weight = self.config_summary.reward.base_height_l2_fix.weight
+        self.rewards.base_height_l2_fix.params["target_height"] = self.config_summary.reward.base_height_l2_fix.target_height
+        self.rewards.base_height_l2_fix.params["sensor_cfg"] = SceneEntityCfg("height_scanner")
+        self.rewards.base_height_l2_fix.params["asset_cfg"] = SceneEntityCfg("robot")
+
+        self.rewards.joint_torques_l2.weight = self.config_summary.reward.joint_torques_l2.weight
+        self.rewards.joint_torques_l2.params["asset_cfg"] = leg_joint_cfg
+
+        self.rewards.joint_vel_l2.weight = self.config_summary.reward.joint_vel_l2.weight
+        self.rewards.joint_vel_l2.params["asset_cfg"] = leg_joint_cfg
+
+        self.rewards.joint_acc_l2.weight = self.config_summary.reward.joint_acc_l2.weight
+        self.rewards.joint_acc_l2.params["asset_cfg"] = leg_joint_cfg
+
+        self.rewards.dof_error_l2.weight = self.config_summary.reward.dof_error_l2.weight
+        self.rewards.dof_error_l2.params["asset_cfg"] = leg_joint_cfg
+
+        # self.rewards.stand_joint_deviation_l1.weight = self.config_summary.reward.stand_joint_deviation_l1.weight
+        # self.rewards.stand_joint_deviation_l1.params["command_name"] = self.config_summary.reward.stand_joint_deviation_l1.command_name
+        # self.rewards.stand_joint_deviation_l1.params["asset_cfg"] = leg_joint_cfg
+
+        self.rewards.action_rate_l2.weight = self.config_summary.reward.action_rate_l2.weight
+
+        self.rewards.action_smoothness_l2.weight = self.config_summary.reward.action_smoothness_l2.weight
+
+        self.rewards.lin_vel_z_l2.weight = self.config_summary.reward.lin_vel_z_l2.weight
+
+        self.rewards.ang_vel_xy_l2.weight = self.config_summary.reward.ang_vel_xy_l2.weight
+
+        self.rewards.feet_air_time.weight = self.config_summary.reward.feet_air_time.weight
+        self.rewards.feet_air_time.params["threshold"] = self.config_summary.reward.feet_air_time.threshold
+        self.rewards.feet_air_time.params["command_name"] = self.config_summary.reward.feet_air_time.command_name
+
+        self.rewards.feet_slide.weight = self.config_summary.reward.feet_slide.weight
+        self.rewards.feet_slide.params["asset_cfg"] = SceneEntityCfg("robot") # Use default robot cfg
+
+        self.rewards.load_sharing.weight = self.config_summary.reward.load_sharing.weight
+
+        self.rewards.undesired_contacts.weight = self.config_summary.reward.undesired_contacts.weight
+        self.rewards.undesired_contacts.params["threshold"] = self.config_summary.reward.undesired_contacts.threshold
 
         # costs
         self.costs.prob_joint_pos.weight = self.config_summary.cost.prob_joint_pos.weight
@@ -320,6 +369,9 @@ class Grq20V2d3FPPOEnvCfg(FPPOEnvCfg):
         self.costs.foot_clearance.params["gait_frequency"] = self.config_summary.cost.prob_gait_pattern.gait_frequency
         self.costs.foot_clearance.params["phase_offsets"] = self.config_summary.cost.prob_gait_pattern.phase_offsets
         self.costs.foot_clearance.params["stance_ratio"] = self.config_summary.cost.prob_gait_pattern.stance_ratio
+        self.costs.foot_clearance.params["command_name"] = "base_velocity"
+        self.costs.foot_clearance.params["min_command_speed"] = self.config_summary.cost.foot_clearance.min_command_speed
+        self.costs.foot_clearance.params["min_base_speed"] = self.config_summary.cost.foot_clearance.min_base_speed
         self.costs.foot_clearance.params["terrain_sensor_cfg"] = SceneEntityCfg("height_scanner")
         self.costs.foot_clearance.params["limit"] = self.config_summary.cost.foot_clearance.limit
 
@@ -340,8 +392,18 @@ class Grq20V2d3FPPOEnvCfg(FPPOEnvCfg):
         # Symmetry cost is computed on-policy using mirrored observations; disable env-side proxy.
         self.costs.symmetric.weight = 0.0
 
+        self.costs.base_contact_force.weight = self.config_summary.cost.base_contact_force.weight
+        self.costs.base_contact_force.params["sensor_cfg"] = SceneEntityCfg("contact_forces")
+        self.costs.base_contact_force.params["body_names"] = ROBOT_THIGH_BODY_NAMES
+        self.costs.base_contact_force.params["threshold"] = (
+            self.config_summary.cost.base_contact_force.contact_force_threshold
+        )
+        self.costs.base_contact_force.params["limit"] = self.config_summary.cost.base_contact_force.limit
+
         # terminations
         self.terminations.base_contact.params["sensor_cfg"].body_names = ROBOT_BASE_LINK
+        # 提高接触终止阈值，避免轻微触地直接终止训练
+        self.terminations.base_contact.params["threshold"] = 50.0
 
 @configclass
 class Grq20V2d3FPPOEnvCfg_PLAY(Grq20V2d3FPPOEnvCfg):

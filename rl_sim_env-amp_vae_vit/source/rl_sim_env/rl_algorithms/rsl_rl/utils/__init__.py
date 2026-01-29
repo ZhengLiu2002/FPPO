@@ -12,3 +12,4 @@ from .utils import (
     string_to_callable,
     unpad_trajectories,
 )
+from .constraint_utils import ConstraintNormalizer

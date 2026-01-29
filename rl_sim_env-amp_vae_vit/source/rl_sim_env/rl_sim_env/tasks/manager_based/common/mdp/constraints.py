@@ -46,6 +46,34 @@ def _normalize_cost(cost: torch.Tensor, limit: float | None) -> torch.Tensor:
     return cost / limit_t
 
 
+def _command_gate(
+    env: ManagerBasedRLEnv,
+    command_name: str | None,
+    min_command_speed: float | None,
+    min_base_speed: float | None,
+    asset_cfg: SceneEntityCfg,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor | None:
+    gate = None
+    if command_name is not None and hasattr(env, "command_manager"):
+        commands = env.command_manager.get_command(command_name)
+        if commands is not None:
+            cmd_speed = torch.linalg.norm(commands[:, :2], dim=1)
+            if min_command_speed is not None:
+                gate = cmd_speed >= min_command_speed
+            else:
+                gate = torch.ones_like(cmd_speed, dtype=torch.bool)
+    if min_base_speed is not None:
+        asset: Articulation = env.scene[asset_cfg.name]
+        base_speed = torch.linalg.norm(asset.data.root_lin_vel_w[:, :2], dim=1)
+        base_gate = base_speed >= min_base_speed
+        gate = base_gate if gate is None else (gate & base_gate)
+    if gate is None:
+        return None
+    return gate.to(device=device, dtype=dtype)
+
+
 def _resolve_gait_frequency(
     env: ManagerBasedRLEnv,
     command_name: str | None,
@@ -383,7 +411,11 @@ def com_frame_prob_constraint(
     elif height_offset != 0.0:
         height = height - height_offset
     min_h, max_h = height_range
-    height_violation = (height < min_h) | (height > max_h)
+    eps = torch.finfo(height.dtype).eps
+    height_span = max(max_h - min_h, float(eps))
+    height_low = torch.clamp(min_h - height, min=0.0)
+    height_high = torch.clamp(height - max_h, min=0.0)
+    height_pen = (height_low + height_high) / height_span
 
     projected_gravity = getattr(asset.data, "projected_gravity_b", None)
     if projected_gravity is None:
@@ -391,9 +423,10 @@ def com_frame_prob_constraint(
         return _zeros_like_env(env, dtype=height.dtype)
     grav_xy = torch.linalg.norm(projected_gravity[:, :2], dim=1)
     angle_limit = math.sin(max_angle_rad)
-    angle_violation = grav_xy > torch.as_tensor(angle_limit, device=grav_xy.device, dtype=grav_xy.dtype)
+    angle_limit_t = torch.as_tensor(angle_limit, device=grav_xy.device, dtype=grav_xy.dtype)
+    angle_pen = torch.clamp(grav_xy - angle_limit_t, min=0.0) / torch.clamp(angle_limit_t, min=eps)
 
-    cost = (height_violation | angle_violation).float()
+    cost = height_pen + angle_pen
     return _normalize_cost(cost, cost_limit)
 
 
@@ -431,6 +464,17 @@ def gait_pattern_prob_constraint(
     expected_contact = phase < stance_ratio
     mismatch = contact != expected_contact
     cost = mismatch.float().mean(dim=1)
+    gate = _command_gate(
+        env,
+        command_name=command_name,
+        min_command_speed=min_command_speed,
+        min_base_speed=min_base_speed,
+        asset_cfg=asset_cfg,
+        device=cost.device,
+        dtype=cost.dtype,
+    )
+    if gate is not None:
+        cost = cost * gate
     return _normalize_cost(cost, limit)
 
 
@@ -506,8 +550,11 @@ def foot_clearance_constraint(
     terrain_sensor_cfg: SceneEntityCfg | None = None,
     limit: float | None = None,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    command_name: str | None = None,
+    min_command_speed: float | None = None,
+    min_base_speed: float | None = None,
 ) -> torch.Tensor:
-    """Average constraint on swing foot clearance (negative peak swing height)."""
+    """Average constraint on swing foot clearance shortfall."""
     asset: Articulation = env.scene[asset_cfg.name]
     asset_foot_ids, _ = asset.find_bodies(foot_body_names, preserve_order=True)
     if not asset_foot_ids:
@@ -561,7 +608,22 @@ def foot_clearance_constraint(
     env._foot_clearance_last = last_buf
     env._foot_clearance_prev_swing = swing
 
-    cost = -torch.mean(last_buf, dim=1)
+    if min_height is None:
+        min_height = limit if limit is not None else 0.0
+    min_height_t = torch.as_tensor(min_height, device=last_buf.device, dtype=last_buf.dtype)
+    violation = torch.clamp(min_height_t - last_buf, min=0.0)
+    cost = torch.mean(violation, dim=1)
+    gate = _command_gate(
+        env,
+        command_name=command_name,
+        min_command_speed=min_command_speed,
+        min_base_speed=min_base_speed,
+        asset_cfg=asset_cfg,
+        device=cost.device,
+        dtype=cost.dtype,
+    )
+    if gate is not None:
+        cost = cost * gate
     return _normalize_cost(cost, limit)
 
 
@@ -605,7 +667,38 @@ def symmetric_constraint(
     for left_idx, right_idx in action_pairs:
         sym += torch.abs(actions[:, left_idx] - actions[:, right_idx])
     sym /= len(action_pairs)
+    gate = _command_gate(
+        env,
+        command_name=command_name,
+        min_command_speed=min_command_speed,
+        min_base_speed=min_base_speed,
+        asset_cfg=asset_cfg,
+        device=sym.device,
+        dtype=sym.dtype,
+    )
+    if gate is not None:
+        sym = sym * gate
     return _normalize_cost(sym, limit)
+
+
+def base_contact_force_constraint(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg,
+    body_names: list[str],
+    threshold: float = 1.0,
+    limit: float | None = None,
+) -> torch.Tensor:
+    """Continuous constraint on base contact force magnitude."""
+    contact_sensor = env.scene.sensors[sensor_cfg.name]
+    body_ids, _ = contact_sensor.find_bodies(body_names, preserve_order=True)
+    if not body_ids:
+        return _zeros_like_env(env)
+    net_forces = contact_sensor.data.net_forces_w_history
+    force_mag = torch.norm(net_forces, dim=-1).max(dim=1)[0][:, body_ids]
+    threshold_t = torch.as_tensor(threshold, device=force_mag.device, dtype=force_mag.dtype)
+    violation = torch.clamp(force_mag - threshold_t, min=0.0)
+    cost = torch.mean(violation, dim=1)
+    return _normalize_cost(cost, limit)
 
 
 def constraint_joint_vel(

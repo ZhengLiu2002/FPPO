@@ -10,6 +10,41 @@ from isaaclab.utils import configclass
 
 
 @configclass
+class RslRlVaeCfg:
+    """Configuration for optional VAE auxiliary module."""
+
+    enabled: bool = False
+    """Whether to enable VAE auxiliary training."""
+
+    num_vae_obs: int | None = None
+    """Number of inputs per frame for VAE history."""
+
+    obs_history_length: int = 1
+    """History length for VAE inputs."""
+
+    num_vae_out: int | None = None
+    """Output latent code dimension (code_for_decoder)."""
+
+    cenet_in_dim: int | None = None
+    """Input dimension for the VAE encoder."""
+
+    cenet_out_dim: int | None = None
+    """Output dimension for the VAE latent code."""
+
+    cenet_recon_dim: int = 45
+    """Reconstruction output dimension of the VAE decoder."""
+
+    loss_coef: float = 1.0
+    """Coefficient for reconstruction loss."""
+
+    kl_coef: float = 1.0
+    """Coefficient for KL loss."""
+
+    learning_rate: float | None = None
+    """Optional learning rate for VAE optimizer. Defaults to policy learning rate if None."""
+
+
+@configclass
 class RslRlPpoActorCriticCfg:
     """Configuration for the PPO actor-critic networks."""
 
@@ -42,6 +77,9 @@ class RslRlPpoActorCriticCfg:
 
     activation: str = MISSING
     """The activation function for the actor and critic networks."""
+
+    vae: RslRlVaeCfg | None = None
+    """Optional VAE configuration for auxiliary training."""
 
 
 @configclass
@@ -138,6 +176,68 @@ class RslRlPpoAlgorithmCfg:
     normalize_cost_advantage: bool = False
     """Whether to normalize the cost advantage. Default is False."""
 
+    constraint_normalization: bool = True
+    """Whether to normalize and aggregate per-term constraints. Default is True."""
+
+    constraint_norm_beta: float = 0.99
+    """EMA coefficient for constraint scaling."""
+
+    constraint_norm_min_scale: float = 1e-3
+    """Minimum scale for constraint normalization."""
+
+    constraint_norm_max_scale: float = 10.0
+    """Maximum scale for constraint normalization."""
+
+    constraint_norm_clip: float = 5.0
+    """Maximum normalized constraint value."""
+
+    constraint_proxy_delta: float = 0.1
+    """Huber hinge delta for constraint proxy."""
+
+    constraint_agg_tau: float = 0.5
+    """Softmax temperature for constraint aggregation."""
+
+    constraint_scale_by_gamma: bool = False
+    """Whether to scale aggregated costs by (1 - cost_gamma)."""
+
+    constraint_cost_scale: float | None = None
+    """Optional explicit scale for aggregated costs."""
+
+    use_preconditioner: bool = True
+    """Whether to use a diagonal preconditioner for projection."""
+
+    preconditioner_beta: float = 0.999
+    """EMA coefficient for the preconditioner second moment."""
+
+    preconditioner_eps: float = 1e-8
+    """Epsilon for preconditioner inversion."""
+
+    feasible_first: bool = True
+    """Whether to prioritize constraint reduction when infeasible."""
+
+    feasible_first_coef: float = 1.0
+    """Scale for feasibility-first gradient blending."""
+
+    # VAE auxiliary parameters
+    learning_rate_vae: float = 2.0e-3
+    """Learning rate for VAE optimizer."""
+
+    vae_beta: float = 0.01
+    """Initial KL beta for VAE."""
+
+    vae_beta_min: float = 1.0e-4
+    """Minimum KL beta for VAE."""
+
+    vae_beta_max: float = 0.1
+    """Maximum KL beta for VAE."""
+
+    vae_desired_recon_loss: float = 0.1
+    """Target reconstruction loss for VAE beta adaptation."""
+
+    derived_action_loss_weight: float = 0.0
+    """Weight for derived action supervision loss."""
+
+
 
 @configclass
 class RslRlOnPolicyRunnerCfg:
@@ -177,6 +277,12 @@ class RslRlOnPolicyRunnerCfg:
 
     save_interval: int = MISSING
     """The number of iterations between saves."""
+
+    early_save_interval: int | None = None
+    """Optional save interval used at the beginning of training."""
+
+    early_save_iterations: int | None = None
+    """Number of iterations for which early saving is active."""
 
     experiment_name: str = MISSING
     """The experiment name."""

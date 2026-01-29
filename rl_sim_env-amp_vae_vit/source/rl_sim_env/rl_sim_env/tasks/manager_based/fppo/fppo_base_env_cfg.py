@@ -115,14 +115,21 @@ class ObservationsCfg:
         """Observations for actor."""
 
         # observation terms (order preserved)
+        base_lin_vel = ObsTerm(func=mdp.base_lin_vel)
         base_ang_vel = ObsTerm(func=mdp.base_ang_vel)
         projected_gravity = ObsTerm(func=mdp.projected_gravity)
         joint_pos = ObsTerm(func=mdp.joint_pos_rel)
         joint_vel = ObsTerm(func=mdp.joint_vel_rel)
+        joint_torques = ObsTerm(func=mdp.joint_effort)
         actions = ObsTerm(func=mdp.last_action)
         velocity_commands = ObsTerm(
             func=mdp.generated_commands_scale, params={"command_name": "base_velocity", "scale": (2.0, 2.0, 0.25)}
         )
+        heading_error = ObsTerm(func=mdp.heading_error, params={"command_name": "base_velocity"})
+        action_hist = ObsTerm(func=mdp.action_history, params={"history_length": 2})
+        height_scan = None
+        random_com = None
+        random_mass = None
 
         def __post_init__(self):
             self.enable_corruption = True
@@ -224,25 +231,86 @@ class EventCfg:
 class RewardsCfg:
     """Reward terms for the MDP."""
 
-    command_tracking = RewTerm(
-        func=mdp.command_tracking_quadratic,
-        weight=10.0,
-        params={"command_name": "base_velocity", "kappa_lin": 0.005, "kappa_ang": 0.005},
+    # 1) 速度/姿态跟踪类（任务奖励）
+    track_lin_vel_xy_exp = RewTerm(
+        func=mdp.track_lin_vel_xy_exp,
+        weight=1.0,
+        params={"command_name": "base_velocity", "std": 0.5},
     )
-    joint_torque_l2 = RewTerm(
-        func=mdp.joint_torque_l2,
-        weight=-0.003,
-        params={"asset_cfg": SceneEntityCfg("robot"), "ref_mass": None, "ref_weight": 1.0},
+    track_ang_vel_z_exp = RewTerm(
+        func=mdp.track_ang_vel_z_exp,
+        weight=0.5,
+        params={"command_name": "base_velocity", "std": 0.5},
     )
-    action_smoothness = RewTerm(
-        func=mdp.action_smoothness_penalty,
-        weight=-0.06,
+
+    # 2) 姿态/高度类
+    flat_orientation_l2 = RewTerm(func=mdp.flat_orientation_l2, weight=-1.0)
+    # flat_orientation_l2_low_speed missing in codebase
+    base_height_l2_fix = RewTerm(
+        func=mdp.base_height_l2_fix,
+        weight=-0.1,
         params={
-            "action_diff_weight": 1.0,
-            "action_diff2_weight": 1.0,
-            "joint_vel_weight": 0.0,
+            "target_height": 0.426,
+            "sensor_cfg": SceneEntityCfg("height_scanner"),
+            "asset_cfg": SceneEntityCfg("robot", body_names="base_link"),
+        },
+    )
+
+    # 3) 关节/执行器惩罚类
+    joint_torques_l2 = RewTerm(func=mdp.joint_torques_l2, weight=-0.0002)
+    joint_vel_l2 = RewTerm(func=mdp.joint_vel_l2, weight=-0.0001)
+    joint_power_distribution = RewTerm(
+        func=mdp.joint_power_distribution,
+        weight=-1.0e-6,
+        params={"asset_cfg": SceneEntityCfg("robot", joint_names=".*_joint")},
+    )
+    joint_acc_l2 = RewTerm(func=mdp.joint_acc_l2, weight=-2.5e-7)
+    dof_error_l2 = RewTerm(func=mdp.dof_error_l2, weight=-0.0, params={"asset_cfg": SceneEntityCfg("robot")})
+
+    hip_pos_l2 = RewTerm(
+        func=mdp.hip_pos_l2,
+        weight=0.0,
+        params={"asset_cfg": SceneEntityCfg("robot", joint_names=".*_hip_joint")},
+    )
+
+    # stand_joint_deviation_l1 = RewTerm(
+    #     func=mdp.stand_joint_deviation_l1,
+    #     weight=-0.0,
+    #     params={"command_name": "base_velocity"},
+    # )
+
+    # 4) 动作正则类
+    action_rate_l2 = RewTerm(func=mdp.action_rate_l2, weight=-0.01)
+    action_smoothness_l2 = RewTerm(func=mdp.action_smoothness_l2, weight=-0.01)
+    lin_vel_z_l2 = RewTerm(func=mdp.lin_vel_z_l2, weight=-2.0)
+    ang_vel_xy_l2 = RewTerm(func=mdp.ang_vel_xy_l2, weight=-0.02)
+    # 5) 接触/步态类
+    feet_air_time = RewTerm(
+        func=mdp.feet_air_time,
+        weight=1.0,
+        params={
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_foot"),
+            "command_name": "base_velocity",
+            "threshold": 0.5,
+        },
+    )
+    feet_slide = RewTerm(
+        func=mdp.feet_slide,
+        weight=-1.0,
+        params={
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_foot"),
             "asset_cfg": SceneEntityCfg("robot"),
         },
+    )
+    load_sharing = RewTerm(
+        func=mdp.load_sharing,
+        weight=0.0,
+        params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_foot")},
+    )
+    undesired_contacts = RewTerm(
+        func=mdp.undesired_contacts,
+        weight=-1.0,
+        params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_thigh"), "threshold": 0.1},
     )
 
 
@@ -250,21 +318,25 @@ class RewardsCfg:
 class CostsCfg:
     """Cost terms for CMDP-style training."""
 
+    # 关节位置越界比例（概率约束）
     prob_joint_pos = CostTerm(
         func=mdp.joint_pos_prob_constraint,
         weight=1.0,
         params={"margin": 0.0, "limit": 1.0, "asset_cfg": SceneEntityCfg("robot")},
     )
+    # 关节速度越界比例（概率约束）
     prob_joint_vel = CostTerm(
         func=mdp.joint_vel_prob_constraint,
         weight=1.0,
         params={"limit": 50.0, "cost_limit": 1.0, "asset_cfg": SceneEntityCfg("robot")},
     )
+    # 关节力矩越界比例（概率约束）
     prob_joint_torque = CostTerm(
         func=mdp.joint_torque_prob_constraint,
         weight=1.0,
         params={"limit": 100.0, "cost_limit": 1.0, "asset_cfg": SceneEntityCfg("robot")},
     )
+    # 非足端身体触地概率（排除 foot，仅非脚触地）
     prob_body_contact = CostTerm(
         func=mdp.body_contact_prob_constraint,
         weight=1.0,
@@ -275,6 +347,7 @@ class CostsCfg:
             "limit": 1.0,
         },
     )
+    # 质心高度/姿态倾角约束（超范围惩罚）
     prob_com_frame = CostTerm(
         func=mdp.com_frame_prob_constraint,
         weight=1.0,
@@ -287,6 +360,7 @@ class CostsCfg:
             "asset_cfg": SceneEntityCfg("robot"),
         },
     )
+    # 期望步态相位与实际触地匹配约束
     prob_gait_pattern = CostTerm(
         func=mdp.gait_pattern_prob_constraint,
         weight=1.0,
@@ -308,11 +382,13 @@ class CostsCfg:
             "limit": 1.0,
         },
     )
+    # 横向速度约束（非指令方向的侧向速度）
     orthogonal_velocity = CostTerm(
         func=mdp.orthogonal_velocity_constraint,
         weight=1.0,
         params={"asset_cfg": SceneEntityCfg("robot"), "limit": 1.0},
     )
+    # 足端接触时的水平滑动速度约束
     contact_velocity = CostTerm(
         func=mdp.contact_velocity_constraint,
         weight=1.0,
@@ -324,6 +400,7 @@ class CostsCfg:
             "asset_cfg": SceneEntityCfg("robot"),
         },
     )
+    # 摆腿抬脚离地间隙不足惩罚（foot clearance）
     foot_clearance = CostTerm(
         func=mdp.foot_clearance_constraint,
         weight=1.0,
@@ -339,8 +416,12 @@ class CostsCfg:
             "terrain_sensor_cfg": None,
             "limit": 1.0,
             "asset_cfg": SceneEntityCfg("robot"),
+            "command_name": None,
+            "min_command_speed": None,
+            "min_base_speed": None,
         },
     )
+    # 足端高度上限约束（抬得过高惩罚）
     foot_height_limit = CostTerm(
         func=mdp.foot_height_limit_constraint,
         weight=1.0,
@@ -352,6 +433,7 @@ class CostsCfg:
             "asset_cfg": SceneEntityCfg("robot"),
         },
     )
+    # 对称性约束（左右肢体/动作对称）
     symmetric = CostTerm(
         func=mdp.symmetric_constraint,
         weight=1.0,
@@ -363,6 +445,17 @@ class CostsCfg:
             "command_name": None,
             "min_command_speed": None,
             "min_base_speed": None,
+            "limit": 1.0,
+        },
+    )
+    # 机体/指定部件接触力超阈值连续惩罚
+    base_contact_force = CostTerm(
+        func=mdp.base_contact_force_constraint,
+        weight=1.0,
+        params={
+            "sensor_cfg": SceneEntityCfg("contact_forces"),
+            "body_names": [],
+            "threshold": 1.0,
             "limit": 1.0,
         },
     )

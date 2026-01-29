@@ -39,6 +39,7 @@ class ActorCriticRecurrent(ActorCritic):
             )
             if rnn_hidden_dim == 256:  # Only override if the new argument is at its default
                 rnn_hidden_dim = kwargs.pop("rnn_hidden_size")
+        vae_cfg = kwargs.pop("vae", None)
         if kwargs:
             print(
                 "ActorCriticRecurrent.__init__ got unexpected arguments, which will be ignored: " + str(kwargs.keys()),
@@ -54,6 +55,7 @@ class ActorCriticRecurrent(ActorCritic):
             cost_critic_hidden_dims=cost_critic_hidden_dims,
             activation=activation,
             init_noise_std=init_noise_std,
+            vae=vae_cfg,
         )
 
         activation = resolve_nn_activation(activation)
